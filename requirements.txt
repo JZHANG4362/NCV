@@ -1,0 +1,10 @@
+# Tested packaging/smoke environment; not the original experiment lockfile.
+numpy==2.0.1
+scipy==1.17.1
+pandas==3.0.5
+matplotlib==3.10.8
+seaborn==0.13.2
+scikit-learn==1.9.0
+hdbscan==0.8.44
+umap-learn==0.5.12
+numba==0.67.0
