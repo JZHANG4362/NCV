@@ -1,60 +1,12 @@
-r"""
-Improvement summary: for each of the 3 cases, how many datasets show an
-internal validity index -- applied to t-SNE- or UMAP-TRANSFORMED data --
-improving on THAT SAME INDEX applied to the ORIGINAL (untransformed)
-data. This is a SELF comparison (index-on-embedding vs. that index's own
-raw-X value), NOT a comparison against a shared Silhouette baseline.
+"""Legacy embedding-summary exporter and loaders used by the bar-plot script.
 
-Silhouette is included as one of the candidates, on equal footing with
-the 8 alternative indices (so "does embedding help Silhouette beat its
-own raw-X self?" is answered the same way as for every other index).
-Silhouette itself -- its Original/t-SNE/UMAP values -- is NOT computed
-by this manifold package (only rNN_Hard and the 8 alternative indices
-are). It is pulled in from the SIBLING package codes_new_manifold_tuned_
-embedding_orig_kgrid, which runs the identical Algorithm-1 tuning design
-for exactly this: 'Silhouette' (raw X), 'TSNE_Ordinary' (perplexity
-tuned), 'UMAP_Ordinary' (n_neighbors tuned) -- see generate_manifold_
-bar_summary_tex.py for the same source used to draw Silhouette as a full
-bar-chart triplet. Silhouette is folded into the SAME per-index
-machinery as the 8 alternative indices (ROW_NAMES = 'Silhouette' + the 8
-indices), so it gets its own row in every per-index table and
-participates in the case-level "any candidate improves" pool.
-
-Two SCENARIOS, differing ONLY in where the t-SNE/UMAP (embedded) value
-comes from -- the ORIGINAL/raw-X reference value is the SAME in both
-(it never depends on embedding-parameter tuning at all):
-  TUNED  -- manifold_fixed_results_*.pkl: Algorithm 1's ACTUAL per-dataset
-            selected embedding parameter (data-driven, never looks at
-            ACC) -- the achievable, deployable scenario.
-  BEST SELECTION (oracle) -- manifold_param_sensitivity_results_*.pkl:
-            the best possible rho for THIS dataset's own curve (ACC-
-            informed oracle, an upper bound on what Algorithm 1 could
-            ever find) -- same source as generate_best_params_detailed_
-            tex.py.
-
-Within each scenario, all 3 clustering methods (KMeans/Spectral/
-Agglomerative) are combined into a SINGLE table -- no averaging across
-methods, just placed side by side (case-level table: as column-groups)
-or stacked as bolded row-group sections (per-index table). t-SNE and
-UMAP representations are always shown as separate columns, never
-pooled/stacked together. Each scenario has a case-level table (does AT
-LEAST ONE of the 9 candidates improve on its own Original value?), and a
-per-index breakdown table (one row per candidate) underneath it.
-
-Every cell is the FRACTION of that case's datasets (as a decimal, e.g.
-0.50, not a fraction string) where the candidate's embedded rho beats
-that SAME candidate's own Original (raw-X) rho, for that (clustering
-method, dataset).
-
-Run this LOCALLY after retrieving data/ from the cluster and (for Case 4)
-running merge_manifold_case4_results.py -- in BOTH this package and the
-sibling section_4_6_local_embeddings/silhouette:
-
-    python generate_improvement_summary_tex.py
-
-Writes tables/improvement_summary.tex. Compile with:
-    cd tables && pdflatex improvement_summary.tex
-"""
+This exporter writes decimal fractions and additional diagnostic summaries.
+Use scripts/build_tables.py through python reproduce.py tables for the
+current main text Tables 4--5 with percentages and pooled Overall columns.
+Both compare each embedded index with its own original-data correlation.
+Tuned values use Algorithm 1; oracle values maximize ACC agreement over
+the saved candidate grid. Reference labels enter only the oracle/evaluation.
+Run this optional exporter from its own directory."""
 
 import os
 import pickle
@@ -103,6 +55,9 @@ CASES = [
 
 
 def load_pickle(path):
+    """Read a saved result payload, returning None when the file is absent."""
+    # Return an explicit missing-cache value so the report can skip unavailable
+    # results without treating them as zero correlations.
     if not os.path.exists(path):
         return None
     with open(path, 'rb') as f:
@@ -110,9 +65,12 @@ def load_pickle(path):
 
 
 def load_manifold_results(path):
+    """Load embedding results with the expected larger-is-better score convention."""
     payload = load_pickle(path)
     if payload is None:
         return None
+    # Reject caches with a different score orientation; otherwise signs could
+    # reverse the meaning of an apparent ranking improvement.
     if payload.get('score_direction_convention') != SCORE_DIRECTION_CONVENTION:
         raise ValueError(f'{path} does not use the expected score-direction convention.')
     return payload['results']
@@ -124,6 +82,8 @@ def merge_silhouette_fixed(fixed_results, sil_fixed_results, order):
     'TSNE_Ordinary'/'UMAP_Ordinary' keys -- so rho_tuned() treats
     'Silhouette' exactly like any other index, no special-casing
     needed downstream."""
+    # Align the sibling Silhouette pipeline's keys with the alternative-index
+    # schema, allowing the same summary logic to process all indices.
     for cm in CLUSTERING_METHODS:
         sil_by_dataset = sil_fixed_results.get(cm, {})
         for dname in order:
@@ -139,6 +99,8 @@ def merge_silhouette_sensitivity(sens_results, sil_sens_results, order):
     dimension of its own (one flat curve per cm/dataset), so that whole
     curve becomes the 'Silhouette' entry -- rho_oracle() then treats it
     exactly like any other index's curve."""
+    # Align the sibling Silhouette pipeline's keys with the alternative-index
+    # schema, allowing the same summary logic to process all indices.
     for cm in CLUSTERING_METHODS:
         sil_by_dataset = sil_sens_results.get(cm, {})
         for dname in order:
@@ -153,6 +115,8 @@ def get_original(fixed_results, cm, dname, idx):
     regardless of scenario, since Original never depends on embedding-
     parameter tuning. Works for 'Silhouette' too once merge_silhouette_
     fixed() has injected 'Silhouette_Original' into fixed_results."""
+    # Retrieve this dataset/index/algorithm combination only; unavailable
+    # values stay missing so they cannot create an artificial improvement.
     v = fixed_results.get(cm, {}).get(dname, {}).get(f'{idx}_Original')
     return v if v is not None and np.isfinite(v) else None
 
@@ -160,18 +124,22 @@ def get_original(fixed_results, cm, dname, idx):
 def rho_tuned(fixed_results, cm, dname, idx, rep):
     """Algorithm 1's actual selected rho for this (cm, dataset, index,
     representation), or None if not present/finite."""
+    # Retrieve this dataset/index/algorithm combination only; unavailable
+    # values stay missing so they cannot create an artificial improvement.
     v = fixed_results.get(cm, {}).get(dname, {}).get(f'{idx}_{rep}')
     return v if v is not None and np.isfinite(v) else None
 
 
 def rho_oracle(sens_results, cm, dname, idx, rep):
-    """Oracle-best rho (this dataset's own curve peak) for this (cm,
-    dataset, index, representation), or None if not present/finite.
-    rep='TSNE' reads the perplexity curve, rep='UMAP' the n_neighbors
-    curve -- matching generate_best_params_detailed_tex.py exactly."""
+    """Take the largest finite ACC correlation for one dataset/index/algorithm.
+    
+    TSNE uses the saved perplexity curve and UMAP uses the neighbor-count
+    curve. This retrospective choice differs from Algorithm 1's selection."""
     entry = sens_results.get(cm, {}).get(dname, {})
     curve_key = 'perplexity' if rep == 'TSNE' else 'n_neighbors'
     curve = entry.get(curve_key, {}).get(idx, {})
+    # Consider only available candidate correlations and take their maximum.
+    # This uses external ACC retrospectively, unlike Algorithm 1's tuned choice.
     finite = [r for r in curve.values() if r is not None and np.isfinite(r)]
     return max(finite) if finite else None
 
@@ -187,6 +155,8 @@ def summarize_index(case, embed_results, original_results, cm, idx, rep, rho_fn)
     for dname in case['order']:
         embedded = rho_fn(embed_results, cm, dname, idx, rep)
         orig = get_original(original_results, cm, dname, idx)
+        # Count a dataset only when both sides of the same-index comparison exist.
+        # Strictly larger embedded correlation counts as improvement; equality does not.
         if embedded is not None and orig is not None:
             if embedded > orig:
                 n_improved += 1
@@ -211,6 +181,8 @@ def summarize_best_of_all(case, embed_results, original_results, cm, rep, rho_fn
             orig = get_original(original_results, cm, dname, idx)
             if embedded is not None and orig is not None:
                 deltas.append(embedded - orig)
+        # Count the dataset once if any index improves on its own original score.
+        # Several improving indices still contribute only one dataset to this summary.
         if deltas:
             if max(deltas) > 0:
                 n_improved += 1
@@ -225,6 +197,8 @@ def decimal_cell(stat):
     EXCLUDED from consideration -- both numerator and denominator -- not
     just flagged while still counted against the full case total."""
     n_total, n_improved, n_missing = stat
+    # Remove missing pairs from the denominator before formatting the auxiliary
+    # report's fraction; missing data must not be counted as a failed improvement.
     n_valid = n_total - n_missing
     if n_valid <= 0:
         return '--'
@@ -237,6 +211,8 @@ def to_case_table(label, tex_label, rows_by_cm):
     (same case order for every cm). ONE table combining all 3 clustering
     methods as column-groups: Case | KMeans(t-SNE,UMAP) |
     Spectral(t-SNE,UMAP) | Agglomerative(t-SNE,UMAP)."""
+    # Assemble the caption, column headings, and LaTeX table structure first;
+    # the following row loop inserts the previously computed summaries.
     lines = []
     lines.append(r'\begin{table}[h]')
     lines.append(r'\centering')
@@ -251,6 +227,8 @@ def to_case_table(label, tex_label, rows_by_cm):
         rf"by side.}}"
     )
     lines.append(rf'\label{{{tex_label}}}')
+    # Build headers that match the fixed case/algorithm ordering of the summary
+    # arrays; all numeric cells below come from the existing improvement counts.
     n_cm = len(CLUSTERING_METHODS)
     lines.append(r'\resizebox{\textwidth}{!}{%')
     lines.append(r'\begin{tabular}{l' + 'cc' * n_cm + '}')
@@ -266,6 +244,8 @@ def to_case_table(label, tex_label, rows_by_cm):
     header = ['Case (\\# datasets)'] + ['t-SNE', 'UMAP'] * n_cm
     lines.append(' & '.join(header) + r' \\')
     lines.append(r'\hline')
+    # Track whether any cell excluded missing pairs so the report can add its
+    # denominator note once, after assembling all rows.
     any_missing = False
     n_rows = len(next(iter(rows_by_cm.values())))
     for i in range(n_rows):
@@ -299,8 +279,12 @@ def to_index_table(label, tex_label, per_index_by_cm, case_headers, row_names):
     sections (same 6 case x representation columns throughout); one row
     per name in row_names (the 8 alternative indices, plus
     'Silhouette') within each clustering-method section."""
+    # Build headers that match the fixed case/algorithm ordering of the summary
+    # arrays; all numeric cells below come from the existing improvement counts.
     n_cases = len(case_headers)
     n_cols = 1 + 2 * n_cases
+    # Assemble the caption, column headings, and LaTeX table structure first;
+    # the following row loop inserts the previously computed summaries.
     lines = []
     lines.append(r'\begin{table}[h]')
     lines.append(r'\centering')
@@ -334,6 +318,8 @@ def to_index_table(label, tex_label, per_index_by_cm, case_headers, row_names):
               + [rf'{title} ({n})' for title, n in case_headers]
               + [rf'{title} ({n})' for title, n in case_headers])
     lines.append(' & '.join(header) + r' \\')
+    # Track whether any cell excluded missing pairs so the report can add its
+    # denominator note once, after assembling all rows.
     any_missing = False
     for cm in CLUSTERING_METHODS:
         lines.append(r'\hline')
@@ -448,6 +434,7 @@ DOC_CLOSING = r"""\end{document}
 
 
 def main():
+    """Build the auxiliary embedding-improvement report from tuned and oracle results."""
     case_headers = []
     scenarios = {
         'tuned': dict(rho_fn=rho_tuned, label='Tuned'),
@@ -499,6 +486,8 @@ def main():
                     data[skey][cm]['per_index'][idx].append((tsne_stat, umap_stat))
                 print(f"{case['tag']} / {skey} / {cm}: any-of-9 tsne={decimal_cell(tsne_bo)} umap={decimal_cell(umap_bo)}")
 
+    # Assemble this auxiliary standalone report from saved correlations.
+    # The main text/Supplement table fragments are built by scripts/build_tables.py.
     parts = [DOC_PREAMBLE]
     parts.append(r'\section{Tuned (Algorithm 1 actual selection)}')
     parts.append(r'\label{sec:tuned}')

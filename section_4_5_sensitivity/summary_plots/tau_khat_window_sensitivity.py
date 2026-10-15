@@ -1,16 +1,11 @@
-r"""
-Dedicated analysis of r* sensitivity to (tau, K-hat, diagnostic-window
-length b) -- plan Section 4.4 -- across all three data families. Pure
-post-processing: every quantity here was already computed and cached by
-the three sibling rstar_selection_landscape.py scripts (see their
-tau_sensitivity/khat_sensitivity/b_sensitivity fields), so this script
-does NOT re-cluster or re-sweep anything -- it only loads, aggregates
-(mean across replications for simulated_data), tabulates,
-and plots.
+"""Draw Supplement Figures S4 (tau), S5 (K-hat), and S6 (buffer b).
 
-Usage:
-    python tau_khat_window_sensitivity.py
-"""
+Read the three data-family caches from the Section 4.5 sensitivity scripts.
+At each parameter value, average the 30 simulated replications; each
+fixed nonconvex or labeled dataset contributes one curve. Published plots
+use rNN-Sil and ACC. Swing tables are additional diagnostics.
+All selection/evaluation results are cached, so no clustering is done here.
+Run here: python tau_khat_window_sensitivity.py"""
 
 import glob
 import os
@@ -56,7 +51,7 @@ FAMILIES = {
 
 def load_family(family_key):
     """Load every cached landscape pickle for one data family (Case 2, 3, or
-    4) and extract, for each (dataset/case, hard-or-soft variant), the
+    4) and extract, for each (dataset/case, rNN variant), the
     already-computed tau/K-hat/b sensitivity results -- no recomputation,
     just reading fields that Layer 1's run_one_case/run_one_dataset already
     populated. For Case 2 (replicated=True), each pickle holds one result
@@ -69,10 +64,13 @@ def load_family(family_key):
         with open(path, 'rb') as f:
             result = pickle.load(f)
         name = result.get('ckey', result.get('dataset'))
-        for variant in ['hard', 'soft']:
+        for variant in ['hard']:
             if info['replicated']:
                 # Case 2: average r* and rho_E(r*) across the N_REP
                 # replications, separately for each tau/K-hat/b grid value.
+                # Each saved rho_E is already a correlation across K in one generated dataset.
+                # Average these 30 replication correlations at each grid value for Figures
+                # S4--S6; do not pool observations or correlate an averaged score curve.
                 reps = result['reps'][variant]
                 # mean r* and rho per grid point, across replications
                 tau_row = {}
@@ -105,6 +103,8 @@ def load_family(family_key):
                             for khat, d in v['khat_sensitivity'].items()}
                 b_row = {b: dict(r_star=d['r_star'], rhoE=d['rhoE'])
                          for b, d in v['b_sensitivity'].items()}
+                # Fixed Case 3/4 datasets have one result each, so no across-replication
+                # averaging is performed for their sensitivity curves.
                 n_units = 1
 
             rows.append(dict(family=family_key, name=name, variant=variant,
@@ -115,8 +115,8 @@ def load_family(family_key):
 def build_wide_table(rows, sweep_key, variant_filter='hard'):
     """One row per (family, name), one column per grid value, cell = r*.
     sweep_key selects which of 'tau'/'khat'/'b' to pivot on; variant_filter
-    restricts to the hard or soft rNN variant. Produces the
-    {tau,khat,b}_sensitivity_{hard,soft}.csv tables: for every one of the 28
+    restricts to the rNN variant. Produces the
+    {tau,khat,b}_sensitivity_hard.csv tables: for every one of the 28
     settings (12 Case2 + 10 Case3 + 6 Case4), what r* would Algorithm 1 have
     picked and what rho_E(r*) would it have achieved, at every grid value."""
     out_rows = []
@@ -124,6 +124,8 @@ def build_wide_table(rows, sweep_key, variant_filter='hard'):
         if r['variant'] != variant_filter:
             continue
         row = {'family': FAMILIES[r['family']]['label'], 'name': r['name']}
+        # Keep selected-r and rho_E columns for every sweep value on the same row;
+        # this is a diagnostic table accompanying Figures S4--S6.
         for key, d in r[sweep_key].items():
             row[f'r*(={key})'] = d['r_star']
         for key, d in r[sweep_key].items():
@@ -137,12 +139,14 @@ def swing_summary(rows, sweep_key, variant_filter='hard'):
     each (family, name), computes the range (max-min) of r* and of
     rho_E(r*) across the grid values of sweep_key -- a small range means the
     method's output is insensitive to that tuning parameter for that
-    setting. Feeds both the *_swing_{hard,soft}.csv tables and the LaTeX
+    setting. Feeds the *_swing_hard.csv tables and the LaTeX
     swing table below."""
     out_rows = []
     for r in rows:
         if r['variant'] != variant_filter:
             continue
+        # Measure sensitivity within each setting by max-minus-min across the sweep.
+        # The r* range and rho_E range describe different effects and are kept separate.
         r_stars = [d['r_star'] for d in r[sweep_key].values()]
         rhoEs = [d['rhoE'] for d in r[sweep_key].values() if not np.isnan(d['rhoE'])]
         out_rows.append(dict(
@@ -166,6 +170,8 @@ def write_swing_latex(swing, sweep_key, out_path):
         'b': (r'Range of $r^*$ and $\rho_E(r^*)$ swept across buffer '
               r'$b\in\{5,10,20\}$, hard $r$NN variant.'),
     }
+    # Group rows by data family, then order settings by their rho_E swing.
+    # This auxiliary table describes sensitivity ranges rather than new correlations.
     family_order = [info['label'] for info in FAMILIES.values()]
     lines = [
         r'\begin{table}[h]',
@@ -177,6 +183,8 @@ def write_swing_latex(swing, sweep_key, out_path):
         r'Family & Setting & $r^*$ range & $\rho_E(r^*)$ range & $\rho_E$ min & $\rho_E$ max \\',
         r'\midrule',
     ]
+    # Preserve the data-family grouping while writing each setting's range of
+    # selected neighborhoods and external correlations as separate columns.
     for family_index, family in enumerate(family_order):
         if family_index:
             lines.append(r'\addlinespace')
@@ -194,15 +202,18 @@ def write_swing_latex(swing, sweep_key, out_path):
         rf'\label{{tab:{sweep_key}-swing}}',
         r'\end{table}',
     ])
+    # Write a standalone LaTeX table fragment from the computed swing summaries.
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
 
 
 def plot_sweep(rows, sweep_key, xlabel, out_path, variant_filter='hard'):
-    """One line per (family, name) setting, showing rho_E(r*) as sweep_key
-    varies across its grid, colored by data family (Case 2/3/4). This is the
-    figure that becomes rstar_{tau,khat,b}_sensitivity.pdf in the
-    manuscript (hard variant only; see ../../tools/build_manuscript_outputs.py)."""
+    """Draw Supplement Figure S4 (tau), S5 (K_hat), or S6 (buffer b).
+    
+    Each line is one dataset or simulation setting; its ordinate is
+    rho_E at the r* selected for that sweep value. Case 2 uses means
+    over replications, while Cases 3--4 each use one fixed dataset.
+    reproduce.py collects these PDFs for the Supplement."""
     fig, ax = plt.subplots(figsize=(6, 4.5))
     colors = {'Case 2': 'steelblue',
               'Case 3': 'darkorange',
@@ -212,8 +223,12 @@ def plot_sweep(rows, sweep_key, xlabel, out_path, variant_filter='hard'):
         if r['variant'] != variant_filter:
             continue
         label = FAMILIES[r['family']]['label']
+        # Each line follows one setting as the selection parameter changes.
+        # The y values are already evaluated at the selected r* for each grid point.
         xs = sorted(r[sweep_key].keys())
         ys = [r[sweep_key][x]['rhoE'] for x in xs]
+        # Color encodes the data family. Add its legend entry only once, while
+        # retaining a separate line for every setting in that family.
         plot_label = label if label not in seen_labels else None
         seen_labels.add(label)
         ax.plot(xs, ys, marker='o', alpha=0.5, color=colors[label], label=plot_label)
@@ -230,24 +245,25 @@ def plot_sweep(rows, sweep_key, xlabel, out_path, variant_filter='hard'):
 
 def main():
     # Load and combine all three Layer 1 caches into one flat list of rows
-    # (one row per (family, dataset/case, hard-or-soft variant)) -- 28
-    # settings x 2 variants = 56 rows total.
+    # (one row per (family, dataset/case, rNN variant)) -- 28
+    # settings in total.
+    """Combine the sensitivity families and export Supplement Figures S4--S6."""
     all_rows = []
+    # Combine 12 simulated settings, 10 nonconvex datasets, and 6 labeled
+    # datasets into the common row format used by the sensitivity figures.
     for family_key in FAMILIES:
         all_rows.extend(load_family(family_key))
     print(f'Loaded {len(all_rows)} (family, name, variant) rows.')
 
-    # For each of the three tuning parameters (tau, K-hat, b) and each
-    # rNN variant (hard, soft): write the wide r*/rhoE table, the swing
-    # summary, and (hard only) the LaTeX swing table, plus the sensitivity
-    # plot. This is where the 6 {tau,khat,b}_sensitivity_{hard,soft}.pdf
-    # figures and matching CSVs are produced.
+    # Write the hard-rNN tables and the three tau/K-hat/b sensitivity figures.
+    # Export tau, K_hat, and buffer sensitivity separately as Figures S4--S6.
+    # The wide and swing tables record the same rows as auxiliary diagnostics.
     for sweep_key, xlabel, fname in [
         ('tau', r'$\tau$', 'tau'),
         ('khat', r'$\widehat K$', 'khat'),
         ('b', r'buffer $b$', 'b'),
     ]:
-        for variant in ['hard', 'soft']:
+        for variant in ['hard']:
             wide = build_wide_table(all_rows, sweep_key, variant)
             wide.to_csv(os.path.join(OUT_TABLE_DIR, f'{fname}_sensitivity_{variant}.csv'), index=False)
 

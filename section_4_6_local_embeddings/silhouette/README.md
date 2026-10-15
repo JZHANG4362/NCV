@@ -1,11 +1,7 @@
-# Section 4.6 / Supplement S12 — Silhouette embeddings
+# Silhouette results for Section 4.6
 
-The three `manifold_tsne_umap_case*.py` scripts compute ordinary Silhouette
-on original data and tuned t-SNE/UMAP embeddings, together with the rNN reference.
-`data/case2/`, `data/case3/`, and `data/case4/` store fixed results, parameter
-curves, and selected parameters. The sibling `other_indices/` summary reads
-these results to complete the nine-index tables and figures.
+These scripts compute Silhouette scores on original, t-SNE, and UMAP data.
+Their results are combined with `../other_indices/` for main text Tables 4–5
+and Supplement Figures S7–S37.
 
-Use the commands in the [Section 4.6 README](../README.md) from the repository
-root. Raw nonconvex and labeled datasets are shared with Sections 4.3 and 4.4.
-
+See the [Section 4.6 instructions](../README.md) for commands and figure filenames.

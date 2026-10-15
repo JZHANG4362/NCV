@@ -1,29 +1,25 @@
-r"""
-r* selection-landscape diagnostics (rstar_sensitivity_experiment_plan.pdf,
-Sections 4.1-4.5) for the real benchmark datasets, K-means only, ACC
-only. See nonconvex_data/rstar_selection_landscape.py
-for the full design rationale (window-definition note, what's
-post-processing vs. new compute, etc.) -- identical logic, adapted for
-this project's real-dataset loaders.
+"""Main text Section 4.5; Supplement Section S11, Figures S4--S6.
 
-SCOPE: defaults to the 6 SMALL/MEDIUM datasets only (Digits, Ecoli, Iris,
-Wine, Libras, Vowel) -- NOT the 3 large ones (MNIST-test,
-Fashion-MNIST-test, Letter). This mirrors every other script in this
-project: those 3 datasets dominate runtime by a wide margin (O(N^2) rNN
-sweep at N=10,000-20,000) regardless of how many indices are computed,
-and this diagnostic needs an even WIDER K range than the production
-pipeline (to post-hoc perturb K-hat/b without re-clustering), which adds
-cost on top of that. This is squarely the "not easiest" tier -- pass
-dataset names on the command line to include them anyway (matching
-Benchmark_data_real.py's own convention), e.g.:
+Study six Case 4 datasets under K-means: Digits, Ecoli, Iris, Libras, Vowel, Wine.
+Standardize features and evaluate agreement with ACC only.
 
-    python rstar_selection_landscape.py                          # 6 small/medium (default)
-    python rstar_selection_landscape.py Digits Iris Wine          # subset
-    python rstar_selection_landscape.py MNIST-test                # large dataset, opt-in only
+Cache cluster assignments and hard rNN score curves over a K range
+covering every tested K-hat and buffer b. Then vary one selection setting
+at a time: tau=0.85/0.90/0.95/1.00, K-hat=20/30/40/50/60, or b=5/10/20.
+The high-K diagnostic window has length m=35, clipped to the available
+range; it can overlap the evaluation range. Changing K-hat changes both
+the selection window and the K values used for the reported correlation.
+Threshold and buffer sweeps keep the evaluation range fixed.
 
-Usage:
-    python rstar_selection_landscape.py
-"""
+summary_plots/tau_khat_window_sensitivity.py builds the three published
+figures from hard-rNN results, averaging the simulated replications.
+Local sensitivity and oracle regret are additional diagnostics.
+Run here: python rstar_selection_landscape.py
+
+This working-folder version queries r+1 neighbors and drops the first
+match. Its fresh results can differ from the supplied sensitivity figures,
+which used a self-inclusive r-neighbor query. The refactored ZIP retains
+that historical convention for reproducing Figures S4--S6."""
 
 import gzip
 import os
@@ -70,6 +66,8 @@ EXTERNAL_METRIC = 'ACC'
 # r* is chosen from this same grid, so caching every r on it is what lets all
 # of the tau/K-hat/b sensitivity analysis below run as pure post-processing.
 R_VALUES = list(range(5, 135, 5))
+# Selection notation: code M corresponds to window size s in Algorithm 1;
+# TAU0 is the baseline tau varied in the sensitivity sweep.
 M = 35                              # top-m window length used by Algorithm 1's C(r) statistic
 TAU0 = 0.95                         # primary/production rank-correlation threshold tau
 B0 = 10                             # primary/production buffer b added on top of K-hat
@@ -104,13 +102,16 @@ EXPECTED_TABLE_DATA = {
 }
 
 
-# ── dataset loaders (copied verbatim from Benchmark_data_real.py) ──────
+# ── dataset loaders ──────
 # All loaders below are byte-for-byte copies of the loaders in
 # ../../section_4_4_labeled_benchmarks/Benchmark_data_real.py, kept here so this diagnostic script can
 # run standalone. _fetch() downloads-and-caches raw files under RAW_DATA_DIR
 # (shared with Case4's own cache, so if Case4 has already been run these
 # downloads are skipped entirely).
 def _fetch(url, fname):
+    """Return the locally cached raw dataset file, downloading it only when absent."""
+    # Reuse the local raw-data file when present; otherwise download it to
+    # the dataset cache so subsequent experiments read the same input file.
     path = os.path.join(RAW_DATA_DIR, fname)
     if not os.path.exists(path):
         print(f'  downloading {url} ...')
@@ -119,13 +120,19 @@ def _fetch(url, fname):
 
 
 def _load_idx_images(gz_path):
+    """Decode an IDX image file and flatten each image into one feature vector."""
     with gzip.open(gz_path) as f:
         _, n, rows, cols = np.frombuffer(f.read(16), dtype='>i4')
+        # Flatten each image into one row of pixel features; the matching label file
+        # supplies the reference classes independently of the pixels.
         data = np.frombuffer(f.read(), dtype=np.uint8).reshape(n, rows * cols)
     return data.astype(float)
 
 
 def _load_idx_labels(gz_path):
+    """Decode the IDX class labels in the same observation order as the image file."""
+    # Skip the 8-byte IDX header, then read one unsigned-byte class per image.
+    # Preserve file order to keep labels aligned with the flattened image rows.
     with gzip.open(gz_path) as f:
         _, n = np.frombuffer(f.read(8), dtype='>i4')
         data = np.frombuffer(f.read(), dtype=np.uint8)
@@ -134,29 +141,43 @@ def _load_idx_labels(gz_path):
 
 # Small/medium loaders (sklearn built-ins, no download needed) --------------
 def load_digits_dataset():
+    """Return the Digits features and reference classes listed in Supplement Table S2."""
+    # Return numeric features and reference labels separately; standardization
+    # and clustering take place in the experiment caller, not in this loader.
     d = load_digits()
     return d.data.astype(float), d.target
 
 
 def load_iris_dataset():
+    """Return the Iris features and reference classes listed in Supplement Table S2."""
+    # Return numeric features and reference labels separately; standardization
+    # and clustering take place in the experiment caller, not in this loader.
     d = load_iris()
     return d.data.astype(float), d.target
 
 
 def load_wine_dataset():
+    """Return the Wine features and reference classes listed in Supplement Table S2."""
+    # Return numeric features and reference labels separately; standardization
+    # and clustering take place in the experiment caller, not in this loader.
     d = load_wine()
     return d.data.astype(float), d.target
 
 
 # Large-dataset loaders (downloaded on first use; slow, excluded by default) -
 def load_mnist_test():
+    """Load the MNIST test split and flatten its pixels, preserving reference labels."""
     path = _fetch('https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz', 'mnist.npz')
     with np.load(path) as f:
+        # Use the test split listed in Supplement Table S2; training images are not pooled in.
         X, y = f['x_test'], f['y_test']
     return X.reshape(X.shape[0], -1).astype(float), y
 
 
 def load_fashion_mnist_test():
+    """Load the Fashion-MNIST test images and matching labels from cached raw files."""
+    # Read the matching test-image and test-label files; decode images to
+    # flat pixel rows and labels to their original observation order.
     img_path = _fetch(
         'https://raw.githubusercontent.com/zalandoresearch/fashion-mnist/master/data/fashion/t10k-images-idx3-ubyte.gz',
         'fmnist_test_images.gz')
@@ -168,43 +189,62 @@ def load_fashion_mnist_test():
 
 # UCI-hosted loaders (downloaded on first use; small/medium size) -----------
 def load_ecoli():
+    """Separate Ecoli numeric features from sequence identifiers and reference classes."""
     path = _fetch('https://archive.ics.uci.edu/ml/machine-learning-databases/ecoli/ecoli.data', 'ecoli.data')
     rows = [l.split() for l in open(path) if l.strip()]
+    # Select only the measured feature columns. The label column is decoded
+    # separately below for external evaluation and is never included in X.
     X = np.array([[float(v) for v in r[1:-1]] for r in rows])
     y_str = np.array([r[-1] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
 
 def load_letter():
+    """Separate the Letter descriptor features from the first-column class labels."""
     path = _fetch(
         'https://archive.ics.uci.edu/ml/machine-learning-databases/letter-recognition/letter-recognition.data',
         'letter-recognition.data')
     rows = [l.strip().split(',') for l in open(path) if l.strip()]
+    # Select only the measured feature columns. The label column is decoded
+    # separately below for external evaluation and is never included in X.
     X = np.array([[float(v) for v in r[1:]] for r in rows])
     y_str = np.array([r[0] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
 
 def load_libras():
+    """Separate Libras movement features from the final-column reference labels."""
     path = _fetch(
         'https://archive.ics.uci.edu/ml/machine-learning-databases/libras/movement_libras.data',
         'movement_libras.data')
     rows = [l.strip().split(',') for l in open(path) if l.strip()]
+    # Select only the measured feature columns. The label column is decoded
+    # separately below for external evaluation and is never included in X.
     X = np.array([[float(v) for v in r[:-1]] for r in rows])
     y_str = np.array([r[-1] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
 
 def load_vowel():
+    """Extract the ten Vowel acoustic features and the reference class, excluding identifiers."""
     path = _fetch(
         'https://archive.ics.uci.edu/ml/machine-learning-databases/undocumented/connectionist-bench/vowel/vowel-context.data',
         'vowel-context.data')
     rows = [l.strip().split() for l in open(path) if l.strip()]
+    # Keep the ten acoustic features, excluding the split flag, speaker ID, sex, and class.
     X = np.array([[float(v) for v in r[3:13]] for r in rows])
     y_str = np.array([r[13] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
@@ -224,44 +264,39 @@ DATASET_LOADERS = {
 }
 
 
-# ── helpers (copied verbatim from Benchmark_data_real.py) ──────────────
-def rnn_affinity_distance(X, r, use_gaussian=False):
-    """Build the rNN-affinity distance matrix used by the rNN-Silhouette
-    score, for a given non-self-neighbor count r. For each point, find its r
-    nearest OTHER points (sklearn's kneighbors is asked for r+1 neighbors and
-    column 0, the point itself at distance 0, is dropped). Two affinity
-    variants are supported:
-      - "hard" (use_gaussian=False): binary affinity, 1.0 if j is among i's r
-        nearest neighbors, else 0.
-      - "soft" (use_gaussian=True): Gaussian-kernel affinity weighted by
-        distance, with per-point bandwidth sigma set to the distance to the
-        r-th (farthest-kept) neighbor.
-    The raw affinity is symmetrized (A = max(A, A^T)), min-max normalized to
-    [0, 1], and converted to a distance D = 1 - A (with a zero diagonal) so it
-    can be fed to sklearn's silhouette_score(metric='precomputed'). Called
-    once per r in R_VALUES per variant, on the same dataset X, to build the
-    full landscape cached below."""
+# ── helpers ──────────────
+def rnn_affinity_distance(X, r):
+    """Build the binary-neighbor distance used by rNN-Silhouette.
+    
+    Query r+1 neighbors and discard the first returned match. For distinct
+    observations this leaves r other points. Take the symmetric union of
+    directed neighbor links and return 1-A with a zero diagonal. Reuse this
+    distance matrix across candidate cluster counts for the same dataset."""
     n = X.shape[0]
     # Exclude the query point itself: r denotes exactly r other observations.
     if not 1 <= r < n:
         raise ValueError(f'r must satisfy 1 <= r < n; got r={r}, n={n}')
     nbrs = NearestNeighbors(n_neighbors=r + 1, algorithm='auto').fit(X)
     dists, idx = nbrs.kneighbors(X)
+    # With distinct points, column 0 is the query itself, leaving r other neighbors.
+    # For coincident points, the neighbor library determines the order of zero-distance ties.
     dists, idx = dists[:, 1:], idx[:, 1:]
+    # Section 3.1: first form the directed binary affinity B_ij = 1{j in N_r(i)}.
+    # Neighbor search uses features only; neither the reference labels nor K enter B.
     A = np.zeros((n, n))
-    if use_gaussian:
-        for i in range(n):
-            sigma = dists[i, -1] or 1e-10
-            for j_pos, j in enumerate(idx[i]):
-                A[i, j] = np.exp(-dists[i, j_pos]**2 / (2 * sigma**2))
-    else:
-        for i in range(n):
-            A[i, idx[i]] = 1.0
+    for i in range(n):
+        A[i, idx[i]] = 1.0
+    # Symmetric union: A_ij = max(B_ij, B_ji) = 1{j in N_r(i) OR i in N_r(j)}.
+    # An edge in either direction is enough; this is not a mutual-neighbor graph.
     A = np.maximum(A, A.T)
     np.fill_diagonal(A, 0)
+    # The affinity is already binary. This retained min-max step leaves its 0/1 values unchanged.
     a_min, a_max = A.min(), A.max()
     if a_max > a_min:
         A = (A - a_min) / (a_max - a_min)
+    # The paper uses dissimilarities: d_r(i,j)=1-A_ij off the diagonal, d_r(i,i)=0.
+    # Thus linked points have distance 0 and unlinked points have distance 1.
+    # Pass this N-by-N matrix as metric="precomputed", not as N feature vectors.
     D = 1.0 - A
     np.fill_diagonal(D, 0)
     return D
@@ -273,6 +308,8 @@ def spearmanr_safe(a, b):
     than 2 valid pairs remain -- used both for the internal C(r) statistic
     and for the external rho_E(r) agreement curve."""
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    # Compare paired entries only. In the experiments an entry is a candidate
+    # partition (one K), not an observation; SciPy averages tied ranks.
     mask = ~np.isnan(a) & ~np.isnan(b)
     if mask.sum() < 2:
         return np.nan
@@ -281,35 +318,55 @@ def spearmanr_safe(a, b):
 
 
 def select_r_topK_spearman(sil_dict, r_values, m, n_k, threshold=0.95):
-    """Core of Algorithm 1's internal (label-free) r* selection rule. For a
-    candidate r, take the top-m largest-K silhouette values within the
-    current diagnostic window (n_k = number of K values in that window) and
-    compute their Spearman correlation against an "ideal" strictly
-    decreasing ranking (m_eff, m_eff-1, ..., 1). A high correlation C(r)
-    means the score behaves monotonically as K grows across the top of the
-    window -- the internal proxy for "this r gives a well-behaved score."
-    r* is the SMALLEST r in r_values whose C(r) reaches `threshold` (tau); if
-    no r reaches it, fall back to the r with the highest C(r)."""
+    """Apply Algorithm 1 to score curves ordered by increasing K.
+    
+    Correlate the last m_eff scores with a strictly decreasing sequence,
+    where m_eff = max(2, min(m, n_k - 1)). Choose the smallest candidate
+    whose correlation reaches the threshold; if none does, choose a maximizer
+    (the smallest candidate breaks ties). Reference labels and external
+    correlations are not used here. Return the choice and diagnostic scores.
+    The high-K window can overlap the evaluation range."""
+    # Algorithm 1 scans candidates in increasing order. Here m is the paper's
+    # requested window size s, and threshold is tau; n_k counts candidate K values.
     avail = sorted(r for r in r_values if r in sil_dict)
     if not avail:
         return r_values[0], {}
+    # Implemented window convention: keep at most n_k-1 entries (at least two).
+    # For K=2,...,35 and m=35 this gives 33 entries, K=3,...,35.
+    # This clipping differs by one from the paper's K_lo formula when s spans
+    # the entire grid; retain it here to preserve the existing numerical results.
     m_eff = max(2, min(m, n_k - 1))
     top_idx = list(range(n_k - m_eff, n_k))
+    # Algorithm 1 constructs v=(m_eff,...,1). Positive rank agreement with v
+    # means the internal score decreases as K increases in the upper K window.
     ideal = np.arange(m_eff, 0, -1, dtype=float)
     c_vals = {}
     for r in avail:
+        # C(candidate) = Spearman(score(K) over K_top, v). This is an internal
+        # shape diagnostic; it does not compare the score with ACC or reference labels.
         obs = np.asarray(sil_dict[r], dtype=float)[top_idx]
         rho = spearmanr_safe(obs, ideal)
+        # An undefined correlation receives -2, below the valid range [-1,1].
+        # If every candidate is undefined, the fallback below returns the smallest one.
         c_vals[r] = rho if not np.isnan(rho) else -2.0
+    # Threshold branch of Algorithm 1: choose the FIRST (smallest) candidate
+    # with C >= tau, rather than maximizing an external agreement score.
     r_star = next((r for r in avail if c_vals[r] >= threshold), None)
     if r_star is None:
+        # Fallback branch: maximize C when the threshold is unmet. Sorted candidate
+        # order makes the smallest candidate win an exact tie.
         r_star = max(avail, key=lambda r: c_vals[r])
     return r_star, c_vals
 
 
 def max_K_eval(k_star):
-    """Default K-hat0: the production diagnostic-window upper bound used
-    elsewhere in this project, max(25, round(1.75 * k_star))."""
+    """Return K-hat = max(25, round(1.75 K*)) for the benchmark evaluation grid.
+    
+    Reported rank correlations use candidate counts K=2,...,K-hat. K*
+    sets this experimental range; Algorithm 1 then selects from internal
+    score curves without comparing them with the reference labels."""
+    # K* specifies the benchmark range only. Each K is a requested partition size;
+    # the experiment assesses its ranking and does not return an estimated best K.
     return int(max(25, round(1.75 * k_star)))
 
 
@@ -319,6 +376,9 @@ def clustering_accuracy(y_true, y_pred):
     (linear_sum_assignment on the negated contingency matrix), then the
     fraction of points correctly matched."""
     cm = contingency_matrix(y_true, y_pred)
+    # ACC = max over one-to-one label matchings of (matched observations)/N.
+    # The assignment solver minimizes cost, so negation or max-count subtraction
+    # converts maximum overlap to its cost convention. Unmatched groups earn no credit.
     row_ind, col_ind = linear_sum_assignment(-cm)
     return cm[row_ind, col_ind].sum() / cm.sum()
 
@@ -326,6 +386,8 @@ def clustering_accuracy(y_true, y_pred):
 def kmeans_labels(X, K, seed):
     """Thin wrapper around sklearn KMeans, matching the production
     pipeline's clustering method for Case 4 (CLUSTERING_METHOD = 'KMeans')."""
+    # Fit a separate K-means partition for this K by minimizing within-cluster
+    # squared Euclidean distances. Reuse these labels for all validity scores.
     return KMeans(n_clusters=K, random_state=seed, n_init='auto').fit_predict(X)
 
 
@@ -336,6 +398,8 @@ def rho_E_curve(sil_by_r, ext_vals, eval_idx):
     ACC(K) across the K values in eval_idx. Unlike C(r), this DOES use the
     labels, so it is reported only for diagnostic/regret purposes and never
     used to pick r* itself."""
+    # For each r, correlate its internal score curve with the reference curve
+    # on eval_idx only; the wider K range remains reserved for selection diagnostics.
     return {r: spearmanr_safe(sil_by_r[r][eval_idx], ext_vals[eval_idx]) for r in R_VALUES}
 
 
@@ -349,11 +413,15 @@ def select_rstar_for_window(sil_by_r, K_TEST, khat, b, m, tau):
     which columns of the cached array are read, never requires reclustering
     or rerunning the rNN sweep. eval_idx (K <= khat, excluding the +b buffer)
     is returned separately for use with rho_E_curve."""
+    # Changing K_hat or b changes K_max=K_hat+b, so first restrict the
+    # precomputed curves before applying the upper-window diagnostic.
     max_select = khat + b
     idx_in_range = [i for i, K in enumerate(K_TEST) if K <= max_select]
     n_k = len(idx_in_range)
     sliced = {r: sil_by_r[r][idx_in_range] for r in R_VALUES}
     r_star, c_vals = select_r_topK_spearman(sliced, R_VALUES, m=m, n_k=n_k, threshold=tau)
+    # Reported rho_E uses K<=K_hat. Changing b alone leaves this set unchanged;
+    # changing K_hat changes both the selection and evaluation ranges.
     eval_idx = [i for i, K in enumerate(K_TEST) if K <= khat]
     return r_star, c_vals, eval_idx
 
@@ -365,11 +433,15 @@ def local_sensitivity(rhoE, r_star):
     best value (a wide "plateau" means many r choices perform comparably)."""
     out = {}
     for delta in LOCAL_DELTAS:
+        # Restrict the existing r grid to |r-r*|<=delta, then find the worst available
+        # rho_E there; subtracting it from rho_E(r*) gives the local drop L_delta.
         neighbors = [r for r in R_VALUES if abs(r - r_star) <= delta]
         vals = [rhoE[r] for r in neighbors if not np.isnan(rhoE[r])]
         out[f'L_{delta}'] = (rhoE[r_star] - min(vals)) if vals else np.nan
     finite = [v for v in rhoE.values() if not np.isnan(v)]
     best = max(finite) if finite else np.nan
+    # W_eps counts grid candidates within eps of the global best rho_E.
+    # It is a count of candidates, not an interval width in units of r.
     for eps in PLATEAU_EPS:
         out[f'W_{eps}'] = sum(1 for v in rhoE.values() if not np.isnan(v) and v >= best - eps)
     return out
@@ -379,12 +451,15 @@ def run_one_dataset(dname):
     """Run the full landscape computation for one real benchmark dataset:
     load + standardize the data, cluster once per K over a WIDE K_TEST range
     (wide enough to cover every K-hat/b combination in the sensitivity
-    grids), then sweep every r in R_VALUES to build the full hard/soft
+    grids), then sweep every r in R_VALUES to build the full hard
     silhouette-vs-K cache. Everything after that -- the primary r*, oracle
     regret, local sensitivity, and the tau/K-hat/b sensitivity sweeps -- is
     pure post-processing over these cached arrays."""
     print(f'\n=== {dname} ===')
     X_raw, y = DATASET_LOADERS[dname]()
+    # Preprocess each feature as (x - sample mean)/sample standard deviation
+    # (StandardScaler uses ddof=0 and leaves constant features at zero).
+    # Use the same transformed X for clustering and every original-data score.
     X = StandardScaler().fit_transform(X_raw)
     k_star = EXPECTED_TABLE_DATA[dname]['K']
     N = X.shape[0]
@@ -398,24 +473,22 @@ def run_one_dataset(dname):
     # Cluster ONCE per K over the wide K_TEST range (shared by every r and
     # variant below) -- the expensive step that must not be repeated.
     seed = 1
+    # Fit each candidate partition once. All indices and all r values below
+    # rank these same partitions within this one clustering algorithm.
     labels_by_K = {K: kmeans_labels(X, K, seed) for K in K_TEST}
     ext_vals = np.array([clustering_accuracy(y, labels_by_K[K]) for K in K_TEST])
 
-    # Full landscape sweep: for every r on the grid, build both the hard and
-    # soft rNN-affinity distance matrices ONCE and score them against every K
-    # already clustered above -- the complete cache that lets every
-    # downstream r* computation run as post-processing.
-    sil_hard_by_r, sil_soft_by_r = {}, {}
+    # Cache the binary-neighbor Silhouette curve for each r over the full K grid.
+    # These same curves support parameter selection and subsequent evaluation.
+    # For partition C_K, a_i is mean d_r within its cluster (excluding self),
+    # b_i is the smallest mean d_r to another cluster, and
+    # S_r(K) = mean_i[(b_i-a_i)/max(a_i,b_i)], with 0 for a_i=b_i=0 or a singleton.
+    # Vary r to change d_r while retaining C_K; each array scores one r across K.
+    sil_hard_by_r = {}
     for r in R_VALUES:
-        D_hard = rnn_affinity_distance(X, r=r, use_gaussian=False)
-        D_soft = rnn_affinity_distance(X, r=r, use_gaussian=True)
+        D_hard = rnn_affinity_distance(X, r=r)
         sil_hard_by_r[r] = np.array([
             silhouette_score(D_hard, labels_by_K[K], metric='precomputed')
-            if len(np.unique(labels_by_K[K])) > 1 else np.nan
-            for K in K_TEST
-        ])
-        sil_soft_by_r[r] = np.array([
-            silhouette_score(D_soft, labels_by_K[K], metric='precomputed')
             if len(np.unique(labels_by_K[K])) > 1 else np.nan
             for K in K_TEST
         ])
@@ -423,14 +496,18 @@ def run_one_dataset(dname):
     result = {'dataset': dname, 'k_star': k_star, 'N': N, 'khat0': khat0, 'K_TEST': K_TEST,
                'ext_vals': ext_vals, 'variants': {}}
 
-    for variant, sil_by_r in [('hard', sil_hard_by_r), ('soft', sil_soft_by_r)]:
+    for variant, sil_by_r in [('hard', sil_hard_by_r)]:
         # Primary/production configuration (tau0, K-hat0, b0): the r* and
         # rho_E(r*) that Algorithm 1 as actually shipped would select and
         # achieve on this dataset.
         r_star0, c_vals0, eval_idx0 = select_rstar_for_window(sil_by_r, K_TEST, khat0, B0, M, TAU0)
+        # C(r) measures the internal decreasing trend; rho_E(r) measures agreement
+        # with ACC. Keep them separate: only C(r) is used to select r*.
         rhoE0 = rho_E_curve(sil_by_r, ext_vals, eval_idx0)
 
         finite_rhoE = {r: v for r, v in rhoE0.items() if not np.isnan(v)}
+        # Optional diagnostic: the oracle maximizes ACC agreement across r.
+        # Its advantage over selected r* is regret; it does not feed Algorithm 1.
         r_oracle = max(finite_rhoE, key=finite_rhoE.get) if finite_rhoE else R_VALUES[0]
         regret = rhoE0[r_oracle] - rhoE0[r_star0]
         fixed_r_rhoE = {r: rhoE0.get(r, np.nan) for r in FIXED_R_COMPARISON if r in rhoE0}
@@ -446,6 +523,7 @@ def run_one_dataset(dname):
         # tau sweep: re-threshold the SAME primary-window c_vals0 at each
         # candidate tau -- no re-slicing or reclustering needed.
         tau_sens = {}
+        # Figure S4: vary only tau, reusing the same C(r) values and evaluation set.
         for tau in TAU_GRID:
             r_s = next((r for r in sorted(c_vals0) if c_vals0[r] >= tau), None)
             if r_s is None:
@@ -457,6 +535,8 @@ def run_one_dataset(dname):
         # (buffer b held at B0) -- purely reading different columns of the
         # wide cached arrays.
         khat_sens = {}
+        # Figure S5: vary K_hat; recompute the window selection and rho_E on its
+        # corresponding evaluation range, reusing the already fitted partitions.
         for khat in khat_values:
             r_s, c_v, eidx = select_rstar_for_window(sil_by_r, K_TEST, khat, B0, M, TAU0)
             rE = rho_E_curve(sil_by_r, ext_vals, eidx)
@@ -464,6 +544,7 @@ def run_one_dataset(dname):
 
         # b sweep: same idea, varying the buffer b (K-hat held at khat0).
         b_sens = {}
+        # Figure S6: vary buffer b only, holding K_hat, tau, and requested s fixed.
         for b in B_GRID:
             r_s, c_v, eidx = select_rstar_for_window(sil_by_r, K_TEST, khat0, b, M, TAU0)
             rE = rho_E_curve(sil_by_r, ext_vals, eidx)
@@ -484,8 +565,15 @@ def run_one_dataset(dname):
 
 
 def plot_landscape(result, variant, out_path):
+    """Draw the internal C(r) and external rho_E(r) diagnostics for one dataset.
+    
+    The upper panel shows the threshold used by Algorithm 1. The lower
+    panel assesses agreement with ACC, carrying the same selected r*.
+    These per-dataset diagnostics supplement the aggregate Figures S4--S6."""
     v = result['variants'][variant]
     r_vals = R_VALUES
+    # Extract C(r) and rho_E(r) in the same candidate order. Only C(r)
+    # determines r*; rho_E(r) evaluates the resulting external agreement.
     c = [v['c_vals'][r] for r in r_vals]
     rE = [v['rhoE'].get(r, np.nan) for r in r_vals]
 
@@ -502,6 +590,8 @@ def plot_landscape(result, variant, out_path):
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
+    # Carry the selected r* into the ACC panel to compare the internal
+    # selection rule with the retrospective performance landscape.
     ax = axes[1]
     ax.plot(r_vals, rE, marker='s', color='darkorange')
     ax.axvline(v['r_star'], color='red', linestyle=':', label=f"$r^*$={v['r_star']}")
@@ -520,6 +610,7 @@ def main():
     # Default to the 6 small/medium datasets (see module docstring SCOPE
     # note); any command-line arguments override this list entirely
     # (including opt-in to the 3 large datasets).
+    """Run the requested sensitivity datasets and save both full curves and summaries."""
     dataset_names = sys.argv[1:] if len(sys.argv) > 1 else SMALL_MEDIUM_DATASETS
     unknown = [d for d in dataset_names if d not in EXPECTED_TABLE_DATA]
     assert not unknown, f'Unknown dataset(s): {unknown}'
@@ -534,17 +625,19 @@ def main():
     # the file Layer 2 (../summary_plots/) later globs and
     # reloads -- and emit the per-dataset landscape figures.
     all_results = {}
+    # Run each fixed dataset independently, retaining the full C(r), rho_E(r),
+    # and selected-r results for later plotting and sensitivity summaries.
     for dname in dataset_names:
         all_results[dname] = run_one_dataset(dname)
         with open(os.path.join(OUT_DATA_DIR, f'rstar_landscape_{dname}.pkl'), 'wb') as f:
             pickle.dump(all_results[dname], f)
-        for variant in ['hard', 'soft']:
+        for variant in ['hard']:
             out_path = os.path.join(OUT_FIG_DIR, f'landscape_{dname}_{variant}.pdf')
             plot_landscape(all_results[dname], variant, out_path)
 
     rows = []
     for dname, result in all_results.items():
-        for variant in ['hard', 'soft']:
+        for variant in ['hard']:
             v = result['variants'][variant]
             rows.append({
                 'dataset': dname, 'variant': variant, 'N': result['N'],
@@ -561,7 +654,7 @@ def main():
     summary_df.to_csv(os.path.join(OUT_TABLE_DIR, 'summary_table.csv'), index=False)
     print('\n' + summary_df.to_string(index=False))
     print(f"\nWrote summary_table.csv, {len(all_results)} pkl files, "
-          f"{2*len(all_results)} landscape figures.")
+          f"{len(all_results)} landscape figures.")
 
 
 if __name__ == '__main__':

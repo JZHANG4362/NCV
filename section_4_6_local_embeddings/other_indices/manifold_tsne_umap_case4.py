@@ -1,71 +1,26 @@
-"""
-Case 4 (real labeled data): companion to section_4_4_labeled_benchmarks/Benchmark_data_real.py.
-Runs all 9 labeled real datasets and compares:
+"""Main text Section 4.6, Tables 4--5; Supplement Section S12, Figures S29--S37.
 
-  1. rNN_Hard       -- the existing rNN-Hard silhouette baseline (r*,
-                        Algorithm 1), on raw X.
-  2-25. 8 alternative internal validity indices -- VRC, WG, WB, DBCV, CVDD,
-        VIASCKDE, DCSI, DB -- each computed on THREE representations:
-        <Index>_Original (raw X, NOT tuned -- no embedding involved),
-        <Index>_TSNE, <Index>_UMAP.
+Case 4: the nine fixed labeled datasets. This pipeline evaluates
+VRC, WG, WB, DBCV, CVDD, VIASCKDE, DCSI, and DB. All comparisons use ACC.
 
-UNLIKE codes_new_manifold_alt_indices_orig_kgrid (the untuned sibling):
-perplexity/n_neighbors ARE tuned here, via Algorithm 1 -- and crucially,
-EACH INDEX gets its OWN independently-selected perplexity*/n_neighbors*,
-using THAT index's own rho-vs-K curve as the selection criterion. This is
-the exact same relationship rNN_Hard's r* already has to rNN_Hard's own
-curve -- not a single shared/proxy criterion. Concretely: for every
-candidate perplexity value, a full t-SNE embedding is fit ONCE (shared
-across indices), but then EVERY requested index's curve is computed on
-that embedding (not just the eventual winner) -- so Algorithm 1 has, for
-each index, a full param-vs-rho landscape to choose from, exactly as it
-does for r*.
+1. Standardize X and fit t-SNE/UMAP candidates in two dimensions, seed 1.
+   Test perplexities 10,20,...,100 subject to 3*p < N-1, and UMAP neighbor
+   counts 5,10,15,20,30,50,75,100 subject to k < N-1.
+2. Fit each clustering algorithm on original standardized X over the K
+   grid. Keep these assignments fixed while scoring X and each embedding.
+   Each embedding is reused across algorithms within this pipeline.
+3. Apply Algorithm 1 separately to each index's candidate score curves
+   on the wider selection grid. Evaluate the selected curve against ACC
+   only on K=2,...,max(25, round(1.75 K*)).
+4. Save selected correlations for Table 4 and the bar plots, plus every
+   candidate's ACC correlation for the retrospective oracle in Table 5.
+   The hard rNN-Sil reference uses original X and its own selected r.
 
-SCALE WARNING (per explicit instruction -- this IS much slower than the
-untuned sibling): sweeping 10 perplexity + 8 n_neighbors values means up
-to 18 embedding fits per dataset (same as the tuned-embedding siblings),
-but ADDITIONALLY, at every one of those 18 embeddings, every requested
-index must be computed -- for the O(N^2) indices (CVDD, VIASCKDE, DBCV,
-and to a lesser extent DCSI) this multiplies their already-expensive
-per-representation cost by up to 18x relative to the untuned sibling,
-which only ever computes each index ONCE per representation.
-
-FAST/SLOW INDEX-GROUP SPLIT (so early results are available sooner, and
-so independent SLURM jobs can run in parallel instead of one job blocking
-on the slowest index): pass 'fast', 'slow', or 'all' as the 2nd CLI
-argument.
-  FAST = VRC, WG, WB, DB   -- no O(N^2) precompute at all (VRC is a
-                                  sklearn one-liner; WG/WB/DB are O(N*K)
-                                  or O(N*D) loops over cluster centroids;
-                                  no CVDD/VIASCKDE precompute is even
-                                  built when running 'fast' alone).
-  SLOW = DBCV, CVDD, VIASCKDE, DCSI  -- CVDD/VIASCKDE each precompute a
-                                  dense N x N matrix (same order of cost
-                                  as the rNN-Hard sweep) PER embedding,
-                                  i.e. up to 18 times per dataset; DBCV
-                                  (hdbscan) and DCSI (per-cluster pairwise
-                                  cdist) are also non-trivial.
-Both groups independently fit their OWN copy of the embedding sweep (kept
-deliberately uncoordinated/stateless between jobs -- simpler and more
-robust than trying to share cached embeddings across separate SLURM
-processes). rNN_Hard is computed in BOTH groups' runs (cheap to just
-redo; avoids a "which job owns rNN_Hard" dependency). Results merge
-naturally: main_results[cm][dname] is loaded fresh each run and only the
-requested group's index keys are written, so a later 'slow' run doesn't
-clobber an earlier 'fast' run's columns (or vice versa) -- see save_all().
-
-Usage (clustering method, then index group, then optional dataset subset
--- mirrors the untuned sibling's CLI with ONE extra positional arg):
-    python manifold_tsne_umap_case4.py KMeans fast                # all 9 datasets, fast indices only
-    python manifold_tsne_umap_case4.py KMeans slow                # all 9 datasets, slow indices only
-    python manifold_tsne_umap_case4.py KMeans all Digits Iris     # both groups, 2 datasets
-    python manifold_tsne_umap_case4.py all fast                   # all 3 clustering methods, fast only
-
-Requires: numpy, scipy, scikit-learn, pandas, matplotlib, seaborn,
-umap-learn, hdbscan (DBCV is NaN for every dataset if hdbscan is missing).
-Raw data: downloaded/cached under data/case4_raw_datasets/ on first run
-(Digits/Iris/Wine come bundled with scikit-learn and need no download).
-"""
+These experiments use one dataset per setting, with no replication.
+The exporter combines this pipeline with its sibling to assemble all nine
+indices. Bar annotations compare each embedding with that index on X.
+Run here: python manifold_tsne_umap_case4.py KMeans all
+The fast/slow/all argument groups indices by computing cost, not by experimental design."""
 
 # ── cell: imports ─────────────────────────────────────────────────────
 import os
@@ -111,35 +66,40 @@ except ImportError:
     print("hdbscan is not installed -- DBCV will be NaN for every dataset/"
           "representation. Run `pip install hdbscan` to enable it.")
 
-# ── cell: helpers -- rNN baseline (verbatim from Benchmark_data_real.py) ──
-def rnn_affinity_distance(X, r, use_gaussian=False):
-    '''
-    Build rNN affinity distance matrix (precomputed, zeros on diagonal).
-    Hard (binary): distance = 0 when either point lists the other among
-    its r nearest neighbors (the symmetric union), and 1 otherwise.
-    '''
+# cell: helpers -- rNN baseline
+def rnn_affinity_distance(X, r):
+    """Build the binary-neighbor distance used by rNN-Silhouette.
+    
+    Query r+1 neighbors and discard the first returned match. For distinct
+    observations this leaves r other points. Take the symmetric union of
+    directed neighbor links and return 1-A with a zero diagonal. Reuse this
+    distance matrix across candidate cluster counts for the same dataset."""
     n = X.shape[0]
     if not 1 <= r < n:
         raise ValueError(f'r must satisfy 1 <= r < n; got r={r}, n={n}')
     nbrs = NearestNeighbors(n_neighbors=r + 1, algorithm='auto').fit(X)
     dists, idx = nbrs.kneighbors(X)
+    # With distinct points, column 0 is the query itself, leaving r other neighbors.
+    # For coincident points, the neighbor library determines the order of zero-distance ties.
     dists, idx = dists[:, 1:], idx[:, 1:]
 
+    # Section 3.1: first form the directed binary affinity B_ij = 1{j in N_r(i)}.
+    # Neighbor search uses features only; neither the reference labels nor K enter B.
     A = np.zeros((n, n))
-    if use_gaussian:
-        for i in range(n):
-            sigma = dists[i, -1] or 1e-10
-            for j_pos, j in enumerate(idx[i]):
-                A[i, j] = np.exp(-dists[i, j_pos]**2 / (2 * sigma**2))
-    else:
-        for i in range(n):
-            A[i, idx[i]] = 1.0
+    for i in range(n):
+        A[i, idx[i]] = 1.0
 
+    # Symmetric union: A_ij = max(B_ij, B_ji) = 1{j in N_r(i) OR i in N_r(j)}.
+    # An edge in either direction is enough; this is not a mutual-neighbor graph.
     A = np.maximum(A, A.T)
     np.fill_diagonal(A, 0)
+    # The affinity is already binary. This retained min-max step leaves its 0/1 values unchanged.
     a_min, a_max = A.min(), A.max()
     if a_max > a_min:
         A = (A - a_min) / (a_max - a_min)
+    # The paper uses dissimilarities: d_r(i,j)=1-A_ij off the diagonal, d_r(i,i)=0.
+    # Thus linked points have distance 0 and unlinked points have distance 1.
+    # Pass this N-by-N matrix as metric="precomputed", not as N feature vectors.
     D = 1.0 - A
     np.fill_diagonal(D, 0)
     return D
@@ -149,17 +109,22 @@ def rnn_affinity_distance(X, r, use_gaussian=False):
 #          n_neighbors are candidate VALUES here -- tuning happens
 #          per-index, below) ──────────────────────────────────────────
 def tsne_embedding(X, perplexity, random_state=1):
+    """Fit one two-dimensional t-SNE candidate with PCA initialization and the given seed."""
+    # Fit one 2D candidate from X; perplexity controls local neighborhoods.
+    # Keep original-data cluster labels fixed when scoring this embedding later.
     return TSNE(n_components=2, perplexity=perplexity, random_state=random_state,
                 init='pca').fit_transform(X)
 
 
 def umap_embedding(X, n_neighbors, random_state=1):
+    """Fit one two-dimensional UMAP candidate with the given neighbor count and seed."""
+    # Fit one 2D candidate using n_neighbors to build the UMAP graph.
+    # This parameter affects the representation, not the number of clustering groups K.
     return umap.UMAP(n_components=2, n_neighbors=n_neighbors,
                       random_state=random_state).fit_transform(X)
 
 
-# ── cell: 9 alternative internal validity indices (verbatim ports from
-#          section_4_4_labeled_benchmarks/Benchmark_data_real.py) ─────────────────────────
+# cell: Eight alternative internal validity indices
 def wemmert_gancarski_index(X, labels):
     '''Wemmert-Gancarski index (maximize).'''
     labels = np.asarray(labels)
@@ -169,6 +134,8 @@ def wemmert_gancarski_index(X, labels):
     if K < 2:
         return np.nan
 
+    # For each proposed cluster, compare its points with its own centroid and
+    # the closest competing centroid; no reference classes enter this calculation.
     centroids = np.array([X[labels == k].mean(axis=0) for k in clusters])
     total = 0.0
     for idx, k in enumerate(clusters):
@@ -182,6 +149,7 @@ def wemmert_gancarski_index(X, labels):
         d_min_other = d_others.min(axis=1)
         with np.errstate(divide='ignore', invalid='ignore'):
             R = np.where(d_min_other > 0, d_own / d_min_other, np.inf)
+        # The cluster contribution is n_c * max(0, 1 - mean_i[d_own(i)/d_other(i)]).
         J_k = R.mean()
         total += max(0.0, n_k * (1.0 - J_k))
     return total / n
@@ -201,10 +169,13 @@ def wb_index(X, labels):
     for k in clusters:
         Xi = X[labels == k]
         c_k = Xi.mean(axis=0)
+        # SSW sums squared distances to each point's own centroid; SSB weights each
+        # centroid's squared distance to the grand mean by its cluster size.
         ssw += np.sum((Xi - c_k) ** 2)
         ssb += Xi.shape[0] * np.sum((c_k - grand_mean) ** 2)
     if ssb == 0:
         return np.nan
+    # WB = K*SSW/SSB is smaller-is-better. Callers negate it before comparing ranks.
     return K * ssw / ssb
 
 
@@ -216,6 +187,8 @@ def dbcv_index(X, labels):
     labels = np.asarray(labels)
     if len(np.unique(labels)) < 2:
         return np.nan
+    # Delegate density-based validity to hdbscan using float64 coordinates.
+    # Unavailable or failed scores remain NaN so summaries can track missingness.
     try:
         return float(_hdbscan_validity_index(X.astype(np.float64), labels))
     except Exception:
@@ -225,12 +198,18 @@ def dbcv_index(X, labels):
 def _bottleneck_matrix_from_mst(mst_csr, n):
     '''Dense NxN matrix of minimax ("bottleneck") path values from an MST.'''
     mst_coo = mst_csr.tocoo()
+    # Process MST edges from shortest to longest, as in Kruskal's construction.
+    # At a merge of weight w, w is the largest edge joining the two components.
     edges = sorted(zip(mst_coo.row, mst_coo.col, mst_coo.data), key=lambda e: e[2])
 
+    # Initially each point is its own component. Track membership explicitly
+    # so a merge can fill all newly connected point pairs at once.
     parent = list(range(n))
     members = [[i] for i in range(n)]
 
     def find(x):
+        """Find the union-find component containing a point, compressing the search path."""
+        # Follow parent links to the component root and shorten the path for later merges.
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
@@ -244,6 +223,8 @@ def _bottleneck_matrix_from_mst(mst_csr, n):
         if len(members[ru]) < len(members[rv]):
             ru, rv = rv, ru
         idx_a, idx_b = np.array(members[ru]), np.array(members[rv])
+        # Every cross-component pair now has bottleneck distance w. Fill both
+        # directions because the underlying distance is symmetric.
         B[np.ix_(idx_a, idx_b)] = w
         B[np.ix_(idx_b, idx_a)] = w
         parent[rv] = ru
@@ -261,17 +242,23 @@ def cvdd_precompute(X, k_nn=7):
     k_use = min(k_nn, n - 1)
     nbrs = NearestNeighbors(n_neighbors=k_use + 1).fit(X)
     dists, _ = nbrs.kneighbors(X)
+    # Mean distance to the k_use non-self neighbors measures local sparsity.
+    # These quantities depend on the representation, so reuse them across K.
     Den = np.maximum(dists[:, 1:].mean(axis=1), 1e-12)
     fDen = Den / Den.max()
 
     Rel = Den[:, None] / Den[None, :]
     RelT = Den[None, :] / Den[:, None]
+    # Density mismatch penalty: 1-exp(-(Den_i/Den_j + Den_j/Den_i - 2)).
+    # Add this penalty times (Den_i+Den_j) to the Euclidean distance.
     fRel = 1.0 - np.exp(-(Rel + RelT - 2.0))
     nD = Den[:, None] + Den[None, :]
     drD = d + fRel * nD
     np.fill_diagonal(drD, 0.0)
 
     mst = minimum_spanning_tree(drD)
+    # The MST yields the minimax connection distance: the largest edge on the
+    # path between i and j. Density weights then turn conD into DD.
     conD = _bottleneck_matrix_from_mst(mst, n)
     DD = np.sqrt(np.outer(fDen, fDen)) * conD
     return {'d': d, 'DD': DD}
@@ -288,6 +275,7 @@ def cvdd_score(stats, labels):
 
     idx_by_c = {c: np.where(labels == c)[0] for c in clusters}
 
+    # For each proposed cluster, separation is its smallest DD to any other cluster.
     sep = np.zeros(K)
     for i, ci in enumerate(clusters):
         idx_i = idx_by_c[ci]
@@ -295,10 +283,14 @@ def cvdd_score(stats, labels):
         for j, cj in enumerate(clusters):
             if i == j:
                 continue
+            # Find the closest density-involved connection to this other cluster,
+            # then retain the smallest separation across all competing clusters.
             sub = DD[np.ix_(idx_i, idx_by_c[cj])]
             best = min(best, sub.min())
         sep[i] = best
 
+    # Compactness uses within-cluster Euclidean MST path distances. The final
+    # index divides total separation by total compactness across clusters.
     com = np.zeros(K)
     for i, ci in enumerate(clusters):
         idx = idx_by_c[ci]
@@ -309,6 +301,8 @@ def cvdd_score(stats, labels):
         d_sub = d[np.ix_(idx, idx)]
         mst_sub = minimum_spanning_tree(d_sub)
         pD_sub = _bottleneck_matrix_from_mst(mst_sub, ni)
+        # Use each unordered within-cluster pair once, excluding the diagonal,
+        # when measuring the mean and spread of MST bottleneck distances.
         iu = np.triu_indices(ni, k=1)
         vals = pD_sub[iu]
         mean_v = vals.mean()
@@ -320,17 +314,22 @@ def cvdd_score(stats, labels):
 
 def silverman_bandwidth(n, d):
     '''Dimension-adaptive KDE bandwidth (Silverman's rule of thumb).'''
+    # Use h=n^(-1/(d+4)) on the min-max-scaled features used by the KDE index.
     return n ** (-1.0 / (d + 4))
 
 
 def viasckde_precompute(X, bandwidth=None, kernel='gaussian'):
     '''Precompute the min-max-scaled distance matrix and per-point KDE
     density once per (dataset, embedding).'''
+    # This index additionally scales features to [0,1] before its KDE step.
+    # It leaves the caller's clustering data and fixed partitions unchanged.
     X01 = MinMaxScaler().fit_transform(X)
     d = squareform(pdist(X01, metric='euclidean'))
     np.fill_diagonal(d, np.inf)
     if bandwidth is None:
         bandwidth = silverman_bandwidth(X01.shape[0], X01.shape[1])
+    # Estimate density with bandwidth h=n^(-1/(D+4)) unless supplied explicitly.
+    # The Gaussian kernel here belongs to VIASCKDE, not to an rNN weighting variant.
     kde = KernelDensity(bandwidth=bandwidth, kernel=kernel).fit(X01)
     log_dens = kde.score_samples(X01)
     dens = np.exp(log_dens - log_dens.max())
@@ -355,9 +354,12 @@ def viasckde_score(stats, labels):
 
         dens_k = dens[idx]
         dmin, dmax = dens_k.min(), dens_k.max()
+        # Normalize density inside each proposed cluster to weight its interior points.
         kde_k = (dens_k - dmin) / (dmax - dmin) if dmax > dmin else np.zeros(ni)
 
         d_same = d[np.ix_(idx, idx)]
+        # The distance diagonal was set to infinity during precomputation, so
+        # this minimum excludes the point itself; singletons are handled next.
         a_i = d_same.min(axis=1)
         a_i = np.where(np.isinf(a_i), 0.0, a_i)
 
@@ -366,6 +368,8 @@ def viasckde_score(stats, labels):
         b_i = d_other.min(axis=1)
 
         denom = np.maximum(np.maximum(a_i, b_i), 1e-12)
+        # a_i/b_i are the nearest same/other-cluster distances, respectively.
+        # Weight (b_i-a_i)/max(a_i,b_i) by normalized density and average over points.
         CoSeD = kde_k * (b_i - a_i) / denom
         total += ni * CoSeD.mean()
 
@@ -382,6 +386,8 @@ def _dcsi_core_points(X_sub, min_pts):
     k2 = min(2 * min_pts, n - 1)
     nbrs = NearestNeighbors(n_neighbors=k2 + 1).fit(X_sub)
     dists, _ = nbrs.kneighbors(X_sub)
+    # Choose the within-cluster radius as the median distance to neighbor 2*min_pts.
+    # A point is core if its min_pts-th non-self neighbor lies within that radius.
     eps = np.median(dists[:, k2])
 
     k1 = min(min_pts, n - 1)
@@ -397,6 +403,8 @@ def _dcsi_conn(core_mask, d_sub):
     if len(idx) < 2:
         return 0.0
     d_core = d_sub[np.ix_(idx, idx)]
+    # The largest core-MST edge is the radius needed to connect all core points.
+    # This connectedness value is compared with cross-cluster separation in DCSI.
     mst = minimum_spanning_tree(d_core)
     return float(mst.data.max()) if mst.nnz > 0 else 0.0
 
@@ -427,11 +435,14 @@ def dcsi_index(X, labels, min_pts=5):
                 sep = 0.0
             else:
                 sep = float(cdist(pts_i, pts_j, metric='euclidean').min())
+            # For this pair of clusters, separation is the smallest core-to-core distance;
+            # connectedness is the larger within-cluster core MST edge. Form their ratio q.
             conn_max = max(conn[ci], conn[cj])
             if conn_max <= 0:
                 q = np.inf if sep > 0 else 0.0
             else:
                 q = sep / conn_max
+            # Map q to q/(1+q), then average equally over cluster pairs for the final score.
             dcsi_pair = q / (1.0 + q) if np.isfinite(q) else 1.0
             pairwise_vals.append(dcsi_pair)
 
@@ -451,6 +462,8 @@ def compute_index_curves(Z, labels_by_K, K_TEST, multi_cluster, index_names):
     cvdd_stats = cvdd_precompute(Z) if 'CVDD' in index_names else None
     viasckde_stats = viasckde_precompute(Z) if 'VIASCKDE' in index_names else None
 
+    # One array per index, one position per K. Z changes the scoring geometry;
+    # labels_by_K always supplies partitions fitted on the original features.
     curves = {name: np.full(len(K_TEST), np.nan) for name in index_names}
     for i, K in enumerate(K_TEST):
         if not multi_cluster[K]:
@@ -460,6 +473,8 @@ def compute_index_curves(Z, labels_by_K, K_TEST, multi_cluster, index_names):
             curves['VRC'][i] = calinski_harabasz_score(Z, labels)
         if 'WG' in index_names:
             curves['WG'][i] = wemmert_gancarski_index(Z, labels)
+        # Reverse the direction of WB (and DB below): every stored curve must rank
+        # larger scores as better before selection and external rank comparison.
         if 'WB' in index_names:
             curves['WB'][i] = -wb_index(Z, labels)
         if 'DBCV' in index_names:
@@ -475,10 +490,12 @@ def compute_index_curves(Z, labels_by_K, K_TEST, multi_cluster, index_names):
     return curves
 
 
-# ── cell: helpers -- Algorithm 1 (verbatim logic) ───────────────────────
+# cell: helpers -- Algorithm 1
 def spearmanr_safe(a, b):
     '''Spearman correlation, returns NaN on degenerate input.'''
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    # Compare paired entries only. In the experiments an entry is a candidate
+    # partition (one K), not an observation; SciPy averages tied ranks.
     mask = ~np.isnan(a) & ~np.isnan(b)
     if mask.sum() < 2:
         return np.nan
@@ -487,35 +504,61 @@ def spearmanr_safe(a, b):
 
 
 def select_param_topK_spearman(sil_dict, param_values, m, n_k, threshold=0.95):
-    '''Generalization of Algorithm 1 / select_r_topK_spearman. Logic
-    copied verbatim.'''
+    """Apply Algorithm 1 to score curves ordered by increasing K.
+    
+    Correlate the last m_eff scores with a strictly decreasing sequence,
+    where m_eff = max(2, min(m, n_k - 1)). Choose the smallest candidate
+    whose correlation reaches the threshold; if none does, choose a maximizer
+    (the smallest candidate breaks ties). Reference labels and external
+    correlations are not used here. Return the choice and diagnostic scores.
+    The high-K window can overlap the evaluation range.
+    For Section 4.6, candidates are perplexities or UMAP neighbor counts,
+    with a separate choice for each internal index and clustering algorithm."""
+    # Algorithm 1 scans candidates in increasing order. Here m is the paper's
+    # requested window size s, and threshold is tau; n_k counts candidate K values.
     avail = sorted(p for p in param_values if p in sil_dict)
     if not avail:
         return param_values[0], {}
+    # Implemented window convention: keep at most n_k-1 entries (at least two).
+    # For K=2,...,35 and m=35 this gives 33 entries, K=3,...,35.
+    # This clipping differs by one from the paper's K_lo formula when s spans
+    # the entire grid; retain it here to preserve the existing numerical results.
     m_eff   = max(2, min(m, n_k - 1))
     top_idx = list(range(n_k - m_eff, n_k))
+    # Algorithm 1 constructs v=(m_eff,...,1). Positive rank agreement with v
+    # means the internal score decreases as K increases in the upper K window.
     ideal   = np.arange(m_eff, 0, -1, dtype=float)
     c_vals  = {}
     for p in avail:
+        # C(candidate) = Spearman(score(K) over K_top, v). This is an internal
+        # shape diagnostic; it does not compare the score with ACC or reference labels.
         obs       = np.asarray(sil_dict[p], dtype=float)[top_idx]
         rho       = spearmanr_safe(obs, ideal)
+        # An undefined correlation receives -2, below the valid range [-1,1].
+        # If every candidate is undefined, the fallback below returns the smallest one.
         c_vals[p] = rho if not np.isnan(rho) else -2.0
+    # Threshold branch of Algorithm 1: choose the FIRST (smallest) candidate
+    # with C >= tau, rather than maximizing an external agreement score.
     p_star = next((p for p in avail if c_vals[p] >= threshold), None)
     if p_star is None:
+        # Fallback branch: maximize C when the threshold is unmet. Sorted candidate
+        # order makes the smallest candidate win an exact tie.
         p_star = max(avail, key=lambda p: c_vals[p])
     return p_star, c_vals
 
 
 def tune_index_over_grid(Y_by_param, param_grid, labels_by_K, K_TEST, multi_cluster,
                           index_names, eval_idx, ext_vals, m, threshold):
-    '''For every candidate param value, fit-independent embedding Y_by_param[param]
-    is already given; compute ALL requested indices' curves on it. Then,
-    per index INDEPENDENTLY, select that index's own best param via
-    Algorithm 1 (mirroring r*'s relationship to rNN_Hard's own curve) and
-    record its rho at that param. Returns (param_star, rho_at_star,
-    curves_by_param) -- all dicts keyed first by param then by index (for
-    curves_by_param) or directly by index (for param_star/rho_at_star).'''
+    """Select each index's embedding parameter, then evaluate its agreement with ACC.
+    
+    For each candidate representation, score the same original-data cluster
+    assignments over the full K grid. Algorithm 1 selects a parameter from
+    each index's curve shape. Only afterward is its score curve correlated
+    with ACC on eval_idx. Return every candidate curve as well, so Table 5
+    can take the retrospective maximum ACC correlation over the same grid."""
     n_k = len(K_TEST)
+    # For each candidate embedding, compute index(K) on the SAME partitions.
+    # This isolates the effect of evaluating the index in a different geometry.
     curves_by_param = {
         param: compute_index_curves(Y_by_param[param], labels_by_K, K_TEST, multi_cluster, index_names)
         for param in param_grid
@@ -523,19 +566,34 @@ def tune_index_over_grid(Y_by_param, param_grid, labels_by_K, K_TEST, multi_clus
     param_star, rho_at_star = {}, {}
     for idx in index_names:
         sil_dict = {param: curves_by_param[param][idx] for param in param_grid}
+        # Select a separate parameter for this index by its upper-K curve shape.
+        # ACC is deliberately absent from the selector's arguments (Table 4).
         p_star, _ = select_param_topK_spearman(sil_dict, param_grid, m=m, n_k=n_k, threshold=threshold)
         param_star[idx] = p_star
+        # Only after selection, compute Spearman(index(K), ACC(K)) on eval_idx.
+        # All candidate curves are returned for the retrospective oracle in Table 5.
         rho_at_star[idx] = spearmanr_safe(sil_dict[p_star][eval_idx], ext_vals)
     return param_star, rho_at_star, curves_by_param
 
 
 def max_K_eval(k_star):
-    '''max(25, 1.75*k*) -- the reference paper's own K-range cap.'''
+    """Return K-hat = max(25, round(1.75 K*)) for the benchmark evaluation grid.
+    
+    Reported rank correlations use candidate counts K=2,...,K-hat. K*
+    sets this experimental range; Algorithm 1 then selects from internal
+    score curves without comparing them with the reference labels."""
+    # K* specifies the benchmark range only. Each K is a requested partition size;
+    # the experiment assesses its ranking and does not return an estimated best K.
     return int(max(25, round(1.75 * k_star)))
 
 
 def max_K_select(k_star):
-    '''max_K_eval(k*) + 10 -- buffer ADDED ONLY for parameter selection.'''
+    """Add ten candidate cluster counts for Algorithm 1's diagnostic window.
+    
+    Scores at these extra K values help select the neighborhood or embedding
+    parameter; they do not enter the reported external rank correlations."""
+    # Algorithm 1 sets K_max = K_hat + b, using b=10 in the main comparisons.
+    # The extra partitions help select r; reported agreement uses K <= K_hat.
     return max_K_eval(k_star) + 10
 
 
@@ -544,18 +602,27 @@ def clustering_accuracy(y_true, y_pred):
     '''Unsupervised clustering accuracy via Hungarian-matched contingency
     table.'''
     cm = contingency_matrix(y_true, y_pred)
+    # ACC = max over one-to-one label matchings of (matched observations)/N.
+    # The assignment solver minimizes cost, so negation or max-count subtraction
+    # converts maximum overlap to its cost convention. Unmatched groups earn no credit.
     row_ind, col_ind = linear_sum_assignment(-cm)
     return cm[row_ind, col_ind].sum() / cm.sum()
 
 
 SCORE_DIRECTION_CONVENTION = 'larger_is_better_v1'
 
-# ── cell: clustering-methods (verbatim) ─────────────────────────────────
+# cell: clustering-methods
 def kmeans_labels(X, K, seed):
+    # Fit a separate K-means partition for this K by minimizing within-cluster
+    # squared Euclidean distances. Reuse these labels for all validity scores.
+    """Fit the requested K-means partition on X using the experiment seed."""
     return KMeans(n_clusters=K, random_state=seed, n_init='auto').fit_predict(X)
 
 
 def spectral_labels(X, K, seed):
+    # Construct the fixed 10-neighbor affinity graph, then partition its spectral
+    # representation into K groups. Its 10 neighbors are independent of validation r.
+    """Fit K spectral clusters using the fixed nearest-neighbor affinity graph."""
     return SpectralClustering(
         n_clusters=K, random_state=seed,
         affinity='nearest_neighbors', n_neighbors=10,
@@ -564,6 +631,9 @@ def spectral_labels(X, K, seed):
 
 
 def agglomerative_labels(X, K, seed):
+    # Ward linkage merges groups to minimize the increase in within-cluster
+    # sum of squares, stopping at the requested K groups.
+    """Fit K agglomerative clusters using Ward linkage on Euclidean features."""
     return AgglomerativeClustering(n_clusters=K, linkage='ward').fit_predict(X)
 
 
@@ -574,7 +644,7 @@ CLUSTERING_METHOD_FUNCS = {
 }
 CLUSTERING_METHODS = ['KMeans', 'Spectral', 'Agglomerative']
 
-# ── cell: load-datasets (verbatim loaders from Benchmark_data_real.py) ──
+# cell: load-datasets
 RAW_DATA_DIR = '../../section_4_4_labeled_benchmarks/data/raw_datasets'
 os.makedirs(RAW_DATA_DIR, exist_ok=True)
 
@@ -593,6 +663,9 @@ DATASET_NAMES = list(EXPECTED_TABLE_DATA.keys())
 
 
 def _fetch(url, fname):
+    """Return the locally cached raw dataset file, downloading it only when absent."""
+    # Reuse the local raw-data file when present; otherwise download it to
+    # the dataset cache so subsequent experiments read the same input file.
     path = os.path.join(RAW_DATA_DIR, fname)
     if not os.path.exists(path):
         print(f'  downloading {url} ...')
@@ -601,13 +674,19 @@ def _fetch(url, fname):
 
 
 def _load_idx_images(gz_path):
+    """Decode an IDX image file and flatten each image into one feature vector."""
     with gzip.open(gz_path) as f:
         _, n, rows, cols = np.frombuffer(f.read(16), dtype='>i4')
+        # Flatten each image into one row of pixel features; the matching label file
+        # supplies the reference classes independently of the pixels.
         data = np.frombuffer(f.read(), dtype=np.uint8).reshape(n, rows * cols)
     return data.astype(float)
 
 
 def _load_idx_labels(gz_path):
+    """Decode the IDX class labels in the same observation order as the image file."""
+    # Skip the 8-byte IDX header, then read one unsigned-byte class per image.
+    # Preserve file order to keep labels aligned with the flattened image rows.
     with gzip.open(gz_path) as f:
         _, n = np.frombuffer(f.read(8), dtype='>i4')
         data = np.frombuffer(f.read(), dtype=np.uint8)
@@ -615,28 +694,42 @@ def _load_idx_labels(gz_path):
 
 
 def load_digits_dataset():
+    """Return the Digits features and reference classes listed in Supplement Table S2."""
+    # Return numeric features and reference labels separately; standardization
+    # and clustering take place in the experiment caller, not in this loader.
     d = load_digits()
     return d.data.astype(float), d.target
 
 
 def load_iris_dataset():
+    """Return the Iris features and reference classes listed in Supplement Table S2."""
+    # Return numeric features and reference labels separately; standardization
+    # and clustering take place in the experiment caller, not in this loader.
     d = load_iris()
     return d.data.astype(float), d.target
 
 
 def load_wine_dataset():
+    """Return the Wine features and reference classes listed in Supplement Table S2."""
+    # Return numeric features and reference labels separately; standardization
+    # and clustering take place in the experiment caller, not in this loader.
     d = load_wine()
     return d.data.astype(float), d.target
 
 
 def load_mnist_test():
+    """Load the MNIST test split and flatten its pixels, preserving reference labels."""
     path = _fetch('https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz', 'mnist.npz')
     with np.load(path) as f:
+        # Use the test split listed in Supplement Table S2; training images are not pooled in.
         X, y = f['x_test'], f['y_test']
     return X.reshape(X.shape[0], -1).astype(float), y
 
 
 def load_fashion_mnist_test():
+    """Load the Fashion-MNIST test images and matching labels from cached raw files."""
+    # Read the matching test-image and test-label files; decode images to
+    # flat pixel rows and labels to their original observation order.
     img_path = _fetch(
         'https://raw.githubusercontent.com/zalandoresearch/fashion-mnist/master/data/fashion/t10k-images-idx3-ubyte.gz',
         'fmnist_test_images.gz')
@@ -647,43 +740,62 @@ def load_fashion_mnist_test():
 
 
 def load_ecoli():
+    """Separate Ecoli numeric features from sequence identifiers and reference classes."""
     path = _fetch('https://archive.ics.uci.edu/ml/machine-learning-databases/ecoli/ecoli.data', 'ecoli.data')
     rows = [l.split() for l in open(path) if l.strip()]
+    # Select only the measured feature columns. The label column is decoded
+    # separately below for external evaluation and is never included in X.
     X = np.array([[float(v) for v in r[1:-1]] for r in rows])
     y_str = np.array([r[-1] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
 
 def load_letter():
+    """Separate the Letter descriptor features from the first-column class labels."""
     path = _fetch(
         'https://archive.ics.uci.edu/ml/machine-learning-databases/letter-recognition/letter-recognition.data',
         'letter-recognition.data')
     rows = [l.strip().split(',') for l in open(path) if l.strip()]
+    # Select only the measured feature columns. The label column is decoded
+    # separately below for external evaluation and is never included in X.
     X = np.array([[float(v) for v in r[1:]] for r in rows])
     y_str = np.array([r[0] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
 
 def load_libras():
+    """Separate Libras movement features from the final-column reference labels."""
     path = _fetch(
         'https://archive.ics.uci.edu/ml/machine-learning-databases/libras/movement_libras.data',
         'movement_libras.data')
     rows = [l.strip().split(',') for l in open(path) if l.strip()]
+    # Select only the measured feature columns. The label column is decoded
+    # separately below for external evaluation and is never included in X.
     X = np.array([[float(v) for v in r[:-1]] for r in rows])
     y_str = np.array([r[-1] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
 
 def load_vowel():
+    """Extract the ten Vowel acoustic features and the reference class, excluding identifiers."""
     path = _fetch(
         'https://archive.ics.uci.edu/ml/machine-learning-databases/undocumented/connectionist-bench/vowel/vowel-context.data',
         'vowel-context.data')
     rows = [l.strip().split() for l in open(path) if l.strip()]
+    # Keep the ten acoustic features, excluding the split flag, speaker ID, sex, and class.
     X = np.array([[float(v) for v in r[3:13]] for r in rows])
     y_str = np.array([r[13] for r in rows])
+    # Encode class names as integers without changing which observations share a class.
+    # These labels are used for external criteria and the benchmark K* count.
     _, y = np.unique(y_str, return_inverse=True)
     return X, y
 
@@ -731,6 +843,8 @@ for name in DATASET_NAMES_TO_LOAD:
 R_VALUES           = list(range(5, 135, 5))    # r grid: 5, 10, ..., 130
 PERPLEXITY_VALUES  = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 N_NEIGHBORS_VALUES = [5, 10, 15, 20, 30, 50, 75, 100]
+# Selection notation: code M corresponds to window size s in Algorithm 1;
+# THRESHOLD corresponds to tau. Neither is the number of clusters K.
 M                  = 35
 THRESHOLD          = 0.95
 
@@ -748,6 +862,9 @@ _run_tag = f'{EXPERIMENT_TAG}_{JOB_TAG}' if JOB_TAG else EXPERIMENT_TAG
 
 
 def results_path_for(base_name):
+    """Resolve the experiment cache filename used by the result readers."""
+    # Keep the established cache naming scheme so the table/plot readers
+    # can find results for the same experiment without changing the saved data format.
     os.makedirs(f'data/{CASE_TAG}', exist_ok=True)
     return f'data/{CASE_TAG}/{base_name}_{_run_tag}.pkl'
 
@@ -765,6 +882,9 @@ print(f'Index group this session: {_cli_group!r} -> {GROUP_INDICES}')
 
 # ── cell: load-results ───────────────────────────────────────────────
 def load_or_init(path):
+    """Load a previous result dictionary if present, otherwise begin with an empty store."""
+    # Load existing entries when available so unrelated stored results survive.
+    # The caller decides which requested entries to recompute; loading alone does not skip work.
     if os.path.exists(path):
         with open(path, 'rb') as f:
             payload = pickle.load(f)
@@ -781,16 +901,24 @@ param_star_results   = load_or_init(results_path_for('manifold_param_star_result
 
 
 def save_results(results_dict, base_name):
+    """Serialize the current result dictionary with its experiment metadata."""
+    # Store correlations together with the metadata below, including the
+    # score-direction convention, so readers can interpret the cached values.
     payload = {
         'results': results_dict,
         'score_direction_convention': SCORE_DIRECTION_CONVENTION,
         'clustering_methods_computed': sorted(results_dict.keys()),
     }
+    # Write the currently accumulated result store as a checkpoint for later
+    # table generation and plotting; this step does not aggregate the scores.
     with open(results_path_for(base_name), 'wb') as f:
         pickle.dump(payload, f)
 
 
 def save_all():
+    """Checkpoint the selected correlations, candidate-parameter sweeps, and selected parameters."""
+    # Save each result store under its own filename: selected correlations,
+    # full parameter sweeps, and selected parameter values serve different downstream tasks.
     save_results(main_results, 'manifold_fixed_results')
     save_results(sensitivity_results, 'manifold_param_sensitivity_results')
     save_results(param_star_results, 'manifold_param_star_results')
@@ -799,11 +927,16 @@ def save_all():
 # ── cell: main-loop ─────────────────────────────────────────────────────
 for dname in DATASETS_TO_RUN:
     X_raw, y = DATASETS[dname]
+    # Preprocess each feature as (x - sample mean)/sample standard deviation
+    # (StandardScaler uses ddof=0 and leaves constant features at zero).
+    # Use the same transformed X for clustering and every original-data score.
     X = StandardScaler().fit_transform(X_raw)
     n_samples, Ddim = X.shape
     k_star = len(np.unique(y))
     max_K_s = max_K_select(k_star)
     max_K_e = max_K_eval(k_star)
+    # K indexes alternative partitions of the same data. Sweep through K_hat+b
+    # for selection, then restrict to the evaluation subset when reporting rho.
     K_TEST = list(range(2, max_K_s + 1))
     n_k = len(K_TEST)
     K_idx_lookup = {K: i for i, K in enumerate(K_TEST)}
@@ -821,10 +954,16 @@ for dname in DATASETS_TO_RUN:
               f'dominant cost here (see module SCALE WARNING).')
 
     r_grid     = [r for r in R_VALUES if r < n_samples]
+    # t-SNE perplexity controls its effective local neighborhood. The 3*p
+    # sample-size filter is the candidate-grid convention of these experiments.
     perpl_grid = [p for p in PERPLEXITY_VALUES if 3 * p < n_samples - 1]
+    # Here lowercase k is UMAP's neighbor count, not the partition count K
+    # and not r in the rNN-Silhouette reference.
     nn_grid    = [k for k in N_NEIGHBORS_VALUES if k < n_samples - 1]
 
     print(f'  building t-SNE embedding sweep ({len(perpl_grid)} perplexity values)...')
+    # Fit each embedding once per dataset and candidate, then reuse it for
+    # all requested clustering algorithms within this pipeline.
     Y_tsne_by_p = {p: tsne_embedding(X, p, random_state=1) for p in perpl_grid}
     print(f'  building UMAP embedding sweep ({len(nn_grid)} n_neighbors values)...')
     Y_umap_by_k = {k: umap_embedding(X, k, random_state=1) for k in nn_grid}
@@ -833,9 +972,15 @@ for dname in DATASETS_TO_RUN:
         cm_fn = CLUSTERING_METHOD_FUNCS[cm_name]
         seed = 1  # no replication -- fixed seed is enough for reproducibility
 
+        # Fit partitions on original standardized X. Keep these labels for all
+        # representations, so changes in agreement measure the validity scores.
+        # Fit each candidate partition once. All indices and all r values below
+        # rank these same partitions within this one clustering algorithm.
         labels_by_K = {K: cm_fn(X, K, seed) for K in K_TEST}
         multi_cluster = {K: len(np.unique(labels_by_K[K])) > 1 for K in K_TEST}
 
+        # ACC(K) is the external reference for Tables 4--5 and Figures S7--S37.
+        # These values assess the selected rankings; they do not select parameters.
         ext_vals = np.array(
             [clustering_accuracy(y, labels_by_K[K]) for K in K_TEST]
         )[eval_idx]
@@ -843,9 +988,13 @@ for dname in DATASETS_TO_RUN:
         # ---- rNN_Hard: always computed (cheap to redo across group runs);
         #      one r's dense NxN matrix at a time (memory fix, see sibling
         #      packages) ----
+        # For partition C_K, a_i is mean d_r within its cluster (excluding self),
+        # b_i is the smallest mean d_r to another cluster, and
+        # S_r(K) = mean_i[(b_i-a_i)/max(a_i,b_i)], with 0 for a_i=b_i=0 or a singleton.
+        # Vary r to change d_r while retaining C_K; each array scores one r across K.
         sil_hard_by_r = {}
         for r in r_grid:
-            D_r = rnn_affinity_distance(X, r, use_gaussian=False)
+            D_r = rnn_affinity_distance(X, r)
             sil_hard_by_r[r] = np.array([
                 silhouette_score(D_r, labels_by_K[K], metric='precomputed') if multi_cluster[K] else np.nan
                 for K in K_TEST
@@ -877,6 +1026,8 @@ for dname in DATASETS_TO_RUN:
         for idx in GROUP_INDICES:
             main_results[cm_name][dname][f'{idx}_UMAP'] = rho_umap[idx]
 
+        # Retain candidate-wise ACC correlations for retrospective comparisons.
+        # These values do not enter Algorithm 1's parameter selection.
         sensitivity_results[cm_name][dname]['r'] = {
             r: spearmanr_safe(sil_hard_by_r[r][eval_idx], ext_vals) for r in r_grid
         }
@@ -934,6 +1085,8 @@ def plot_combined(cm_name, dname):
     for this (cm, dname) so far (may be a subset if only one index group
     has been retrieved); right = rNN_Hard rho vs. r. Saved to
     figures/{CASE_TAG}/{cm_name}/{EXPERIMENT_TAG}/Combined_{dname}.{pdf,png}.'''
+    # Read the selected-score summary, complete parameter sweep, and chosen parameter
+    # from separate stores; plotting does not recompute their statistical results.
     bar_data    = main_results.get(cm_name, {}).get(dname, {})
     curve_data  = sensitivity_results.get(cm_name, {}).get(dname, {})
     star_data   = param_star_results.get(cm_name, {}).get(dname, {})
@@ -947,6 +1100,8 @@ def plot_combined(cm_name, dname):
     fig, axes = plt.subplots(1, 2, figsize=(26, 7), gridspec_kw={'width_ratios': [3, 1]})
 
     ax = axes[0]
+    # Preserve the configured method order while omitting unavailable correlations.
+    # Each bar is agreement across K for this dataset and clustering algorithm.
     available = [m for m in ALL_METHODS if bar_data.get(m) is not None and np.isfinite(bar_data[m])]
     if available:
         vals = [bar_data[m] for m in available]
@@ -965,11 +1120,16 @@ def plot_combined(cm_name, dname):
     ax2 = axes[1]
     curve = curve_data.get('r', {})
     if curve:
+        # Sort the parameter grid before drawing its saved external-correlation curve.
+        # The curve is a retrospective evaluation, not the decreasing-trend diagnostic.
         xs = sorted(curve.keys())
         ax2.plot(xs, [curve[x] for x in xs], marker='o', color='steelblue', linewidth=2)
+        # The dotted marker locates the parameter already selected from internal scores.
         star = star_data.get('r_star')
         if star is not None:
             ax2.axvline(star, color='steelblue', linestyle=':', linewidth=2.5, label=f'$r^*={star}$')
+        # The dashed oracle marker maximizes the displayed external agreement.
+        # Its use of reference labels distinguishes it from the selected parameter.
         oracle = max(curve, key=curve.get)
         ax2.axvline(oracle, color='steelblue', linestyle='--', linewidth=1.5, alpha=0.5, label=f'oracle={oracle}')
         ax2.axhline(0, color='grey', linewidth=1, linestyle='--')
@@ -986,6 +1146,8 @@ def plot_combined(cm_name, dname):
                 fontsize=15, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 1, 0.93])
 
+    # Keep diagnostic exports separated by experiment/algorithm so successive
+    # plots do not overwrite results from a different comparison.
     out_dir = f'figures/{CASE_TAG}/{cm_name}/{EXPERIMENT_TAG}'
     os.makedirs(out_dir, exist_ok=True)
     fname = f'Combined_{dname}'

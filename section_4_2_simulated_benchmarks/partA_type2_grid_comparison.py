@@ -1,49 +1,20 @@
-"""
-Standalone script for partA_type2_grid_comparison.ipynb, extracted for
-remote (SLURM) execution. Runs the default grid: 12 cases (k*=6,30 x
-D=2,10,200 x compactness=compact,sparse),
-N_REP=100, all 10 validity indices (both rNN_Hard and rNN_Soft), against
-ALL 7 external metrics (Jaccard, SS3, ARI, NMI, Powers, NID, ACC) in a
-single pass -- see "Multi-metric batching" below. Clustering method is
-selected via a command-line argument, one of KMeans / Spectral /
-Agglomerative (defaults to KMeans if omitted):
+"""Main text Section 4.2: Table 1; Supplement Section S8: Tables S4--S45.
 
-    python partA_type2_grid_comparison.py KMeans
-    python partA_type2_grid_comparison.py Spectral
-    python partA_type2_grid_comparison.py Agglomerative
+Generate 100 replications of each of 12 Gaussian-mixture settings:
+K*=6/30, D=2/10/200, and standard deviation 0.1/0.8. Standardize each
+dataset, then fit one clustering algorithm over the candidate K grid.
+Select r with Algorithm 1 on internal score curves and assess rankings
+against ACC, Jaccard, SS3, ARI, NMI, Powers, and NID. The same partitions
+and internal curves are reused for all seven external criteria.
 
-Multi-metric batching: r* selection (select_r_topK_spearman) and every
-validity index's raw score curve depend only on (X, labels_by_K) for a
-given replicate -- NOT on which external metric is being validated
-against. So instead of rerunning clustering + the rNN affinity sweep once
-per external metric (7x the cost), this script computes each index's raw
-K-curve and rNN's r* ONCE per (case, clustering_method, rep), then loops
-over all 7 EXTERNAL_METRIC_FUNCS to compute the Spearman rho against each
-metric's ext_vals. Results for each metric are still saved to their own
-separate pickle file (see RESULTS_PATH_FOR below), preserving the
-existing per-metric file naming convention exactly, so no downstream
-code (visualize-results notebooks, main.tex table generation) needs to
-change.
+The nine published indices include rNN-Silhouette with binary neighbor weights. Table 1
+uses K-means/ACC means; the Supplement gives means and medians for all
+three algorithms. scripts/build_tables.py performs this aggregation.
+The supplied Spectral k30_D200_sparse cache has 39 replications; this
+script requests 100 for a fresh run and does not fill missing results.
 
-r* selection method (superseding the earlier top-K-Spearman /
-smoothed-peak-gap / anchor-crosscheck variants, all now under archive/):
-- EVALUATION (the reported rho for every index, not just rNN): computed
-  only over K = 2..max(25, 1.75*k*) -- the reference paper's ("Benchmarking
-  of Clustering Validity Measures Revisited") own K-range cap, Section 3.2.
-- SELECTION of r* (rNN_Hard and rNN_Soft independently): select_r_topK_spearman
-  (top-m monotonic-decrease-vs-ideal-sequence Spearman criterion), m=35,
-  over a wider range K = 2..(max(25,1.75*k*)+10) -- the +10 buffer gives
-  the m=35 window headroom past the evaluation boundary while still
-  overlapping substantially back into it (a buffer equal to m was tested
-  and found catastrophic: zero overlap between what's selected-for and
-  what's measured).
-
-The main loop already checkpoints (every 20 reps and after every case), so
-an interrupted/timed-out job can simply be resubmitted -- completed cases
-are preserved in the results pickle.
-
-Requires: numpy, scipy, scikit-learn, pandas, matplotlib, seaborn, hdbscan
-"""
+Run here: python partA_type2_grid_comparison.py KMeans
+Use Spectral or Agglomerative for the other algorithms."""
 
 
 # ── cell: imports ─────────────────────────────────────────────────────
@@ -77,9 +48,8 @@ from sklearn.neighbors import NearestNeighbors, KernelDensity
 
 sns.set_style('whitegrid')
 
-# Spectral Clustering routinely warns "Graph is not fully connected" with
-# nearest_neighbors affinity when K is large relative to n_neighbors -- this
-# is expected/benign given our K sweeps up to 40, so it is silenced here.
+# Suppress repeated disconnected-graph warnings during the K sweep.
+# Spectral affinity uses 10 neighbors independently of the rNN score grid.
 warnings.filterwarnings('ignore', message='Graph is not fully connected')
 
 try:
@@ -92,46 +62,57 @@ except ImportError:
 
 # ── cell: helpers ─────────────────────────────────────────────────────
 def simulate_type2_data(n_samples, n_features, k_star, compactness, random_state=1):
-    '''Approximate a Type-2-style dataset using Gaussian blobs; identical to
-    type2_case_comparison.ipynb's simulate_type2_data.'''
+    """Generate the Gaussian mixtures used in Case 2 and its follow-up studies.
+    
+    make_blobs draws centers uniformly in [-10, 10] in each coordinate,
+    uses isotropic standard deviation compactness, and distributes samples
+    as evenly as possible among k_star components. The caller standardizes
+    features before clustering and scoring (Supplement Section S5)."""
+    # Supplement Section S5: mu_c ~ Uniform([-10,10]^D), then
+    # X_i | y_i=c ~ N(mu_c, compactness^2 I_D). compactness is sigma, not variance.
+    # make_blobs balances component sizes up to one observation and shuffles rows.
+    # y records component membership for external evaluation; it is not a feature.
     X, y = make_blobs(n_samples=n_samples, n_features=n_features,
                       centers=k_star, cluster_std=compactness,
                       random_state=random_state)
     return X, y
 
 
-def rnn_affinity_distance(X, r, use_gaussian=False):
-    '''
-    Build rNN affinity distance matrix (precomputed, zeros on diagonal).
-    Hard (binary): distance = 0 when either point lists the other among
-    its r nearest neighbors (the symmetric union), and 1 otherwise.
-    Soft (Gaussian): Gaussian-weighted affinity converted to distance.
-    '''
+def rnn_affinity_distance(X, r):
+    """Build the binary-neighbor distance used by rNN-Silhouette.
+    
+    Query r+1 neighbors and discard the first returned match. For distinct
+    observations this leaves r other points. Take the symmetric union of
+    directed neighbor links and return 1-A with a zero diagonal. Reuse this
+    distance matrix across candidate cluster counts for the same dataset."""
     n = X.shape[0]
-    # sklearn returns the query point itself as the first neighbor.  Query
-    # r+1 points and remove that self-match so r means exactly r OTHER
-    # observations throughout the manuscript and Algorithm 1.
+    # Query r+1 neighbors and drop the first returned match. For distinct
+    # observations this removes self and retains r other observations.
     if not 1 <= r < n:
         raise ValueError(f'r must satisfy 1 <= r < n; got r={r}, n={n}')
     nbrs = NearestNeighbors(n_neighbors=r + 1, algorithm='auto').fit(X)
     dists, idx = nbrs.kneighbors(X)
+    # With distinct points, column 0 is the query itself, leaving r other neighbors.
+    # For coincident points, the neighbor library determines the order of zero-distance ties.
     dists, idx = dists[:, 1:], idx[:, 1:]
 
+    # Section 3.1: first form the directed binary affinity B_ij = 1{j in N_r(i)}.
+    # Neighbor search uses features only; neither the reference labels nor K enter B.
     A = np.zeros((n, n))
-    if use_gaussian:
-        for i in range(n):
-            sigma = dists[i, -1] or 1e-10
-            for j_pos, j in enumerate(idx[i]):
-                A[i, j] = np.exp(-dists[i, j_pos]**2 / (2 * sigma**2))
-    else:
-        for i in range(n):
-            A[i, idx[i]] = 1.0
+    for i in range(n):
+        A[i, idx[i]] = 1.0
 
+    # Symmetric union: A_ij = max(B_ij, B_ji) = 1{j in N_r(i) OR i in N_r(j)}.
+    # An edge in either direction is enough; this is not a mutual-neighbor graph.
     A = np.maximum(A, A.T)
     np.fill_diagonal(A, 0)
+    # The affinity is already binary. This retained min-max step leaves its 0/1 values unchanged.
     a_min, a_max = A.min(), A.max()
     if a_max > a_min:
         A = (A - a_min) / (a_max - a_min)
+    # The paper uses dissimilarities: d_r(i,j)=1-A_ij off the diagonal, d_r(i,i)=0.
+    # Thus linked points have distance 0 and unlinked points have distance 1.
+    # Pass this N-by-N matrix as metric="precomputed", not as N feature vectors.
     D = 1.0 - A
     np.fill_diagonal(D, 0)
     return D
@@ -140,6 +121,8 @@ def rnn_affinity_distance(X, r, use_gaussian=False):
 def spearmanr_safe(a, b):
     '''Spearman correlation, returns NaN on degenerate input.'''
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    # Compare paired entries only. In the experiments an entry is a candidate
+    # partition (one K), not an observation; SciPy averages tied ranks.
     mask = ~np.isnan(a) & ~np.isnan(b)
     if mask.sum() < 2:
         return np.nan
@@ -148,45 +131,65 @@ def spearmanr_safe(a, b):
 
 
 def select_r_topK_spearman(sil_dict, r_values, m, n_k, threshold=0.95):
-    '''
-    Select r* using the top-m overestimate Spearman criterion: checks
-    whether the silhouette curve decreases monotonically across the top-m
-    largest K's via Spearman correlation against the ideal strictly-
-    decreasing sequence [m,...,1]. Picks the smallest r whose score
-    clears threshold; falls back to argmax over r otherwise.
-
-    m is clipped to n_k-1 (m_eff) so this is always well-defined even
-    when the requested window is wider than the available K range.
-    '''
+    """Apply Algorithm 1 to score curves ordered by increasing K.
+    
+    Correlate the last m_eff scores with a strictly decreasing sequence,
+    where m_eff = max(2, min(m, n_k - 1)). Choose the smallest candidate
+    whose correlation reaches the threshold; if none does, choose a maximizer
+    (the smallest candidate breaks ties). Reference labels and external
+    correlations are not used here. Return the choice and diagnostic scores.
+    The high-K window can overlap the evaluation range."""
+    # Algorithm 1 scans candidates in increasing order. Here m is the paper's
+    # requested window size s, and threshold is tau; n_k counts candidate K values.
     avail = sorted(r for r in r_values if r in sil_dict)
     if not avail:
         return r_values[0], {}
+    # Implemented window convention: keep at most n_k-1 entries (at least two).
+    # For K=2,...,35 and m=35 this gives 33 entries, K=3,...,35.
+    # This clipping differs by one from the paper's K_lo formula when s spans
+    # the entire grid; retain it here to preserve the existing numerical results.
     m_eff   = max(2, min(m, n_k - 1))
     top_idx = list(range(n_k - m_eff, n_k))
+    # Algorithm 1 constructs v=(m_eff,...,1). Positive rank agreement with v
+    # means the internal score decreases as K increases in the upper K window.
     ideal   = np.arange(m_eff, 0, -1, dtype=float)
     c_vals  = {}
     for r in avail:
+        # C(candidate) = Spearman(score(K) over K_top, v). This is an internal
+        # shape diagnostic; it does not compare the score with ACC or reference labels.
         obs        = np.asarray(sil_dict[r], dtype=float)[top_idx]
         rho        = spearmanr_safe(obs, ideal)
+        # An undefined correlation receives -2, below the valid range [-1,1].
+        # If every candidate is undefined, the fallback below returns the smallest one.
         c_vals[r]  = rho if not np.isnan(rho) else -2.0
+    # Threshold branch of Algorithm 1: choose the FIRST (smallest) candidate
+    # with C >= tau, rather than maximizing an external agreement score.
     r_star = next((r for r in avail if c_vals[r] >= threshold), None)
     if r_star is None:
+        # Fallback branch: maximize C when the threshold is unmet. Sorted candidate
+        # order makes the smallest candidate win an exact tie.
         r_star = max(avail, key=lambda r: c_vals[r])
     return r_star, c_vals
 
 
 def max_K_eval(k_star):
-    '''max(25, 1.75*k*) -- the reference paper's own K-range cap (Section
-    3.2), used as the EVALUATION scope: every reported rho (all 10
-    indices, not just rNN) is computed only over K=2..max_K_eval.'''
+    """Return K-hat = max(25, round(1.75 K*)) for the benchmark evaluation grid.
+    
+    Reported rank correlations use candidate counts K=2,...,K-hat. K*
+    sets this experimental range; Algorithm 1 then selects from internal
+    score curves without comparing them with the reference labels."""
+    # K* specifies the benchmark range only. Each K is a requested partition size;
+    # the experiment assesses its ranking and does not return an estimated best K.
     return int(max(25, round(1.75 * k_star)))
 
 
 def max_K_select(k_star):
-    '''max_K_eval(k*) + 10 -- a small buffer ADDED ONLY for r* selection
-    (rNN_Hard / rNN_Soft), giving the m=35 window headroom past the
-    evaluation boundary while still overlapping substantially back into
-    the evaluation range.'''
+    """Add ten candidate cluster counts for Algorithm 1's diagnostic window.
+    
+    Scores at these extra K values help select the neighborhood or embedding
+    parameter; they do not enter the reported external rank correlations."""
+    # Algorithm 1 sets K_max = K_hat + b, using b=10 in the main comparisons.
+    # The extra partitions help select r; reported agreement uses K <= K_hat.
     return max_K_eval(k_star) + 10
 
 # ── cell: custom-indices ──────────────────────────────────────────────
@@ -204,6 +207,8 @@ def wemmert_gancarski_index(X, labels):
     if K < 2:
         return np.nan
 
+    # For each proposed cluster, compare its points with its own centroid and
+    # the closest competing centroid; no reference classes enter this calculation.
     centroids = np.array([X[labels == k].mean(axis=0) for k in clusters])
     total = 0.0
     for idx, k in enumerate(clusters):
@@ -217,6 +222,7 @@ def wemmert_gancarski_index(X, labels):
         d_min_other = d_others.min(axis=1)
         with np.errstate(divide='ignore', invalid='ignore'):
             R = np.where(d_min_other > 0, d_own / d_min_other, np.inf)
+        # The cluster contribution is n_c * max(0, 1 - mean_i[d_own(i)/d_other(i)]).
         J_k = R.mean()
         total += max(0.0, n_k * (1.0 - J_k))
     return total / n
@@ -236,10 +242,13 @@ def wb_index(X, labels):
     for k in clusters:
         Xi = X[labels == k]
         c_k = Xi.mean(axis=0)
+        # SSW sums squared distances to each point's own centroid; SSB weights each
+        # centroid's squared distance to the grand mean by its cluster size.
         ssw += np.sum((Xi - c_k) ** 2)
         ssb += Xi.shape[0] * np.sum((c_k - grand_mean) ** 2)
     if ssb == 0:
         return np.nan
+    # WB = K*SSW/SSB is smaller-is-better. Callers negate it before comparing ranks.
     return K * ssw / ssb
 
 
@@ -254,6 +263,8 @@ def dbcv_index(X, labels):
     labels = np.asarray(labels)
     if len(np.unique(labels)) < 2:
         return np.nan
+    # Delegate density-based validity to hdbscan using float64 coordinates.
+    # Unavailable or failed scores remain NaN so summaries can track missingness.
     try:
         return float(_hdbscan_validity_index(X.astype(np.float64), labels))
     except Exception:
@@ -274,12 +285,18 @@ def _bottleneck_matrix_from_mst(mst_csr, n):
     an exact O(n^2) algorithm.
     '''
     mst_coo = mst_csr.tocoo()
+    # Process MST edges from shortest to longest, as in Kruskal's construction.
+    # At a merge of weight w, w is the largest edge joining the two components.
     edges = sorted(zip(mst_coo.row, mst_coo.col, mst_coo.data), key=lambda e: e[2])
 
+    # Initially each point is its own component. Track membership explicitly
+    # so a merge can fill all newly connected point pairs at once.
     parent = list(range(n))
     members = [[i] for i in range(n)]
 
     def find(x):
+        """Find the union-find component containing a point, compressing the search path."""
+        # Follow parent links to the component root and shorten the path for later merges.
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
@@ -293,6 +310,8 @@ def _bottleneck_matrix_from_mst(mst_csr, n):
         if len(members[ru]) < len(members[rv]):
             ru, rv = rv, ru
         idx_a, idx_b = np.array(members[ru]), np.array(members[rv])
+        # Every cross-component pair now has bottleneck distance w. Fill both
+        # directions because the underlying distance is symmetric.
         B[np.ix_(idx_a, idx_b)] = w
         B[np.ix_(idx_b, idx_a)] = w
         parent[rv] = ru
@@ -314,17 +333,23 @@ def cvdd_precompute(X, k_nn=7):
     k_use = min(k_nn, n - 1)
     nbrs = NearestNeighbors(n_neighbors=k_use + 1).fit(X)
     dists, _ = nbrs.kneighbors(X)
+    # Mean distance to the k_use non-self neighbors measures local sparsity.
+    # These quantities depend on the representation, so reuse them across K.
     Den = np.maximum(dists[:, 1:].mean(axis=1), 1e-12)
     fDen = Den / Den.max()
 
     Rel = Den[:, None] / Den[None, :]
     RelT = Den[None, :] / Den[:, None]
+    # Density mismatch penalty: 1-exp(-(Den_i/Den_j + Den_j/Den_i - 2)).
+    # Add this penalty times (Den_i+Den_j) to the Euclidean distance.
     fRel = 1.0 - np.exp(-(Rel + RelT - 2.0))
     nD = Den[:, None] + Den[None, :]
     drD = d + fRel * nD
     np.fill_diagonal(drD, 0.0)
 
     mst = minimum_spanning_tree(drD)
+    # The MST yields the minimax connection distance: the largest edge on the
+    # path between i and j. Density weights then turn conD into DD.
     conD = _bottleneck_matrix_from_mst(mst, n)
     DD = np.sqrt(np.outer(fDen, fDen)) * conD
     return {'d': d, 'DD': DD}
@@ -342,6 +367,7 @@ def cvdd_score(stats, labels):
 
     idx_by_c = {c: np.where(labels == c)[0] for c in clusters}
 
+    # For each proposed cluster, separation is its smallest DD to any other cluster.
     sep = np.zeros(K)
     for i, ci in enumerate(clusters):
         idx_i = idx_by_c[ci]
@@ -349,10 +375,14 @@ def cvdd_score(stats, labels):
         for j, cj in enumerate(clusters):
             if i == j:
                 continue
+            # Find the closest density-involved connection to this other cluster,
+            # then retain the smallest separation across all competing clusters.
             sub = DD[np.ix_(idx_i, idx_by_c[cj])]
             best = min(best, sub.min())
         sep[i] = best
 
+    # Compactness uses within-cluster Euclidean MST path distances. The final
+    # index divides total separation by total compactness across clusters.
     com = np.zeros(K)
     for i, ci in enumerate(clusters):
         idx = idx_by_c[ci]
@@ -363,6 +393,8 @@ def cvdd_score(stats, labels):
         d_sub = d[np.ix_(idx, idx)]
         mst_sub = minimum_spanning_tree(d_sub)
         pD_sub = _bottleneck_matrix_from_mst(mst_sub, ni)
+        # Use each unordered within-cluster pair once, excluding the diagonal,
+        # when measuring the mean and spread of MST bottleneck distances.
         iu = np.triu_indices(ni, k=1)
         vals = pD_sub[iu]
         mean_v = vals.mean()
@@ -389,6 +421,7 @@ def silverman_bandwidth(n, d):
     informative regardless of dimensionality (verified: same check gives
     ~-0.9 at the d=784, n=10000 scale).
     '''
+    # Use h=n^(-1/(d+4)) on the min-max-scaled features used by the KDE index.
     return n ** (-1.0 / (d + 4))
 
 
@@ -397,11 +430,15 @@ def viasckde_precompute(X, bandwidth=None, kernel='gaussian'):
     density once per dataset (both independent of the partition).
     bandwidth=None (default) uses silverman_bandwidth(n, d) -- pass an
     explicit value to override.'''
+    # This index additionally scales features to [0,1] before its KDE step.
+    # It leaves the caller's clustering data and fixed partitions unchanged.
     X01 = MinMaxScaler().fit_transform(X)
     d = squareform(pdist(X01, metric='euclidean'))
     np.fill_diagonal(d, np.inf)  # exclude self when finding nearest
     if bandwidth is None:
         bandwidth = silverman_bandwidth(X01.shape[0], X01.shape[1])
+    # Estimate density with bandwidth h=n^(-1/(D+4)) unless supplied explicitly.
+    # The Gaussian kernel here belongs to VIASCKDE, not to an rNN weighting variant.
     kde = KernelDensity(bandwidth=bandwidth, kernel=kernel).fit(X01)
     log_dens = kde.score_samples(X01)
     # Subtract the max log-density before exponentiating (softmax-style
@@ -432,9 +469,12 @@ def viasckde_score(stats, labels):
 
         dens_k = dens[idx]
         dmin, dmax = dens_k.min(), dens_k.max()
+        # Normalize density inside each proposed cluster to weight its interior points.
         kde_k = (dens_k - dmin) / (dmax - dmin) if dmax > dmin else np.zeros(ni)
 
         d_same = d[np.ix_(idx, idx)]
+        # The distance diagonal was set to infinity during precomputation, so
+        # this minimum excludes the point itself; singletons are handled next.
         a_i = d_same.min(axis=1)
         a_i = np.where(np.isinf(a_i), 0.0, a_i)  # singleton clusters
 
@@ -443,6 +483,8 @@ def viasckde_score(stats, labels):
         b_i = d_other.min(axis=1)
 
         denom = np.maximum(np.maximum(a_i, b_i), 1e-12)
+        # a_i/b_i are the nearest same/other-cluster distances, respectively.
+        # Weight (b_i-a_i)/max(a_i,b_i) by normalized density and average over points.
         CoSeD = kde_k * (b_i - a_i) / denom
         total += ni * CoSeD.mean()
 
@@ -465,6 +507,8 @@ def _dcsi_core_points(X_sub, min_pts):
     k2 = min(2 * min_pts, n - 1)
     nbrs = NearestNeighbors(n_neighbors=k2 + 1).fit(X_sub)
     dists, _ = nbrs.kneighbors(X_sub)
+    # Choose the within-cluster radius as the median distance to neighbor 2*min_pts.
+    # A point is core if its min_pts-th non-self neighbor lies within that radius.
     eps = np.median(dists[:, k2])
 
     k1 = min(min_pts, n - 1)
@@ -480,6 +524,8 @@ def _dcsi_conn(core_mask, d_sub):
     if len(idx) < 2:
         return 0.0
     d_core = d_sub[np.ix_(idx, idx)]
+    # The largest core-MST edge is the radius needed to connect all core points.
+    # This connectedness value is compared with cross-cluster separation in DCSI.
     mst = minimum_spanning_tree(d_core)
     return float(mst.data.max()) if mst.nnz > 0 else 0.0
 
@@ -487,7 +533,7 @@ def _dcsi_conn(core_mask, d_sub):
 def dcsi_index(X, labels, min_pts=5):
     '''
     DCSI (Gauss, Scheipl & Herrmann, 2025). Maximize (in [0,1)).
-    See markdown above for the exact formulas implemented.
+    The inline steps below define the implemented pairwise scores.
     '''
     labels = np.asarray(labels)
     clusters = np.unique(labels)
@@ -517,11 +563,14 @@ def dcsi_index(X, labels, min_pts=5):
                 # difference would -- at large D with unbalanced clusters
                 # that tensor can reach many GB in one allocation.
                 sep = float(cdist(pts_i, pts_j, metric='euclidean').min())
+            # For this pair of clusters, separation is the smallest core-to-core distance;
+            # connectedness is the larger within-cluster core MST edge. Form their ratio q.
             conn_max = max(conn[ci], conn[cj])
             if conn_max <= 0:
                 q = np.inf if sep > 0 else 0.0
             else:
                 q = sep / conn_max
+            # Map q to q/(1+q), then average equally over cluster pairs for the final score.
             dcsi_pair = q / (1.0 + q) if np.isfinite(q) else 1.0
             pairwise_vals.append(dcsi_pair)
 
@@ -536,6 +585,8 @@ def _pair_counts(y_true, y_pred):
       c = true-diff & pred-same   (FP)
       d = true-diff & pred-diff   (TN)
     '''
+    # Counts refer to ordered pairs of distinct observations. The common factor
+    # of two cancels in the pair-count ratios used by Jaccard, SS3, and Powers.
     C = pair_confusion_matrix(y_true, y_pred)
     d, c = C[0, 0], C[0, 1]
     b, a = C[1, 0], C[1, 1]
@@ -544,6 +595,8 @@ def _pair_counts(y_true, y_pred):
 
 def jaccard_pairs(y_true, y_pred):
     '''Jaccard coefficient (pair-counting external index).'''
+    # Count pairs kept together in both partitions relative to all pairs
+    # kept together in at least one partition; pairs separated by both do not contribute.
     a, b, c, d = _pair_counts(y_true, y_pred)
     denom = a + b + c
     return a / denom if denom > 0 else 0.0
@@ -551,6 +604,8 @@ def jaccard_pairs(y_true, y_pred):
 
 def sokal_sneath3(y_true, y_pred):
     '''Sokal & Sneath 3 pair-counting index: (a+d)/(b+c).'''
+    # Compare agreeing pairs (a+d) with disagreeing pairs (b+c).
+    # Perfect pair agreement can give infinity, which is retained in the score array.
     a, b, c, d = _pair_counts(y_true, y_pred)
     denom = b + c
     if denom <= 0:
@@ -561,6 +616,8 @@ def sokal_sneath3(y_true, y_pred):
 def powers_informedness(y_true, y_pred):
     ''''Powers' (Bookmaker Informedness / Youden's J) on the pair-counting
     confusion matrix: TPR + TNR - 1.'''
+    # Combine the ability to keep same-class pairs together and to separate
+    # different-class pairs: TPR + TNR - 1, with zero-denominator guards below.
     a, b, c, d = _pair_counts(y_true, y_pred)
     tpr = a / (a + b) if (a + b) > 0 else 0.0
     tnr = d / (c + d) if (c + d) > 0 else 0.0
@@ -571,6 +628,8 @@ def nid_distance(y_true, y_pred):
     '''Normalized Information Distance (Vinh, Epps & Bailey, 2010):
     NID = 1 - I(U,V) / max(H(U), H(V)). A DISTANCE (0 = identical
     partitions), not a similarity -- see markdown above.'''
+    # Compute mutual information first, then normalize by the larger of the
+    # two entropy quantities below and subtract from one to form the distance.
     mi = mutual_info_score(y_true, y_pred)
     h_true = entropy(y_true)
     h_pred = entropy(y_pred)
@@ -586,6 +645,9 @@ def clustering_accuracy(y_true, y_pred):
     classes, then fraction of points in a matched pair). Handles
     n_pred != n_true by leaving extra clusters/classes unmatched (0 credit).'''
     cm = contingency_matrix(y_true, y_pred)
+    # ACC = max over one-to-one label matchings of (matched observations)/N.
+    # The assignment solver minimizes cost, so negation or max-count subtraction
+    # converts maximum overlap to its cost convention. Unmatched groups earn no credit.
     row_ind, col_ind = linear_sum_assignment(-cm)
     return cm[row_ind, col_ind].sum() / cm.sum()
 
@@ -608,6 +670,12 @@ SCORE_DIRECTION_CONVENTION = 'larger_is_better_v1'
 
 
 def orient_external_values(metric, values):
+    """Orient external scores so that larger values mean better agreement.
+    
+    For rank correlation, -NID and the Supplement's 1-NID induce the same
+    ranking: they differ only by an additive constant."""
+    # Orient external criteria before rank comparison so larger means better.
+    # For NID, reversing its order is necessary because the raw quantity is a distance.
     values = np.asarray(values, dtype=float)
     return -values if metric in LOWER_IS_BETTER_EXTERNAL_METRICS else values
 
@@ -619,6 +687,9 @@ def orient_external_values(metric, values):
 # `seed = ...` in the main loop) so K-means/Spectral's internal random
 # initialization is reproducible across reruns of the same replicate.
 def kmeans_labels(X, K, seed):
+    # Fit a separate K-means partition for this K by minimizing within-cluster
+    # squared Euclidean distances. Reuse these labels for all validity scores.
+    """Fit the requested K-means partition on X using the experiment seed."""
     return KMeans(n_clusters=K, random_state=seed, n_init='auto').fit_predict(X)
 
 
@@ -628,6 +699,9 @@ def spectral_labels(X, K, seed):
     # this is standard sklearn spectral clustering, not the paper's rNN
     # affinity. assign_labels='kmeans' runs k-means on the spectral
     # embedding as the final labeling step.
+    # Construct the fixed 10-neighbor affinity graph, then partition its spectral
+    # representation into K groups. Its 10 neighbors are independent of validation r.
+    """Fit K spectral clusters using the fixed nearest-neighbor affinity graph."""
     return SpectralClustering(
         n_clusters=K, random_state=seed,
         affinity='nearest_neighbors', n_neighbors=10,
@@ -639,6 +713,9 @@ def agglomerative_labels(X, K, seed):
     # Ward linkage is a deterministic bottom-up merge given (X, K), so
     # `seed` is accepted only to keep the shared 3-argument signature and
     # is otherwise unused here.
+    # Ward linkage merges groups to minimize the increase in within-cluster
+    # sum of squares, stopping at the requested K groups.
+    """Fit K agglomerative clusters using Ward linkage on Euclidean features."""
     return AgglomerativeClustering(n_clusters=K, linkage='ward').fit_predict(X)
 
 
@@ -663,15 +740,14 @@ CASES = [
 
 N_REP     = 100
 R_VALUES  = list(range(5, 135, 5))      # r grid for the rNN affinities, up to 130
+# Selection notation: code M corresponds to window size s in Algorithm 1;
+# THRESHOLD corresponds to tau. Neither is the number of clusters K.
 M         = 35                          # fixed m for the r* Spearman criterion
 THRESHOLD = 0.95
 # K_TEST is now per-case (depends on k_star via max_K_select/max_K_eval above)
 # -- computed inside the main loop, not as a single flat range.
 
-ALL_METHODS = [
-    'VRC', 'Silhouette', 'WG', 'WB', 'DBCV', 'rNN_Hard', 'rNN_Soft',
-    'CVDD', 'VIASCKDE', 'DCSI',
-]
+ALL_METHODS = ['VRC', 'Silhouette', 'WG', 'WB', 'DBCV', 'rNN_Hard', 'CVDD', 'VIASCKDE', 'DCSI']
 CLUSTERING_METHODS = ['KMeans', 'Spectral', 'Agglomerative']
 
 # ── Choose which method(s) to (re-)compute ──────────────────────────────
@@ -698,11 +774,15 @@ def case_key(case):
     e.g. (6, 2, "compact") -> "k6_D2_compact". Used as the dict key that
     indexes into `results[metric][clustering_method][...]` and as the
     lookup key downstream in merge_case2_results.py / generate_case2_tables.py.'''
+    # Encode K*, dimension, and compactness in a stable key shared by
+    # the experiment cache and downstream tables; no statistical quantity is computed here.
     k_star, D, comp_label = case
     return f'k{k_star}_D{D}_{comp_label}'
 
 def sample_size_for(k_star):
-    '''Cluster sizes in {20, 100} per MDCGen's Type 2 description, capped at 1000 total.'''
+    """Use N = min(1000, 50 K*): 300 points for K*=6 and 1000 for K*=30."""
+    # Cap N at 1000 while targeting 50 observations per true component:
+    # K*=6 gives N=300, and K*=30 gives N=1000 with nearly balanced component sizes.
     return min(1000, k_star * 50)
 
 # ── Optional per-job output tag, for safe PARALLEL execution ───────────
@@ -716,17 +796,11 @@ def sample_size_for(k_star):
 JOB_TAG = os.environ.get('JOB_TAG', '').strip()
 
 def results_path_for(metric):
-    '''Build the output pickle path for one external metric. ACC uses the
-    bare base filename (no metric suffix) for historical reasons -- it was
-    the original/only metric before the other 6 were added, so its file
-    kept the plain name and every other metric appends `_{metric}`.
-    JOB_TAG (see above), when set, is inserted right after the base name so
-    each parallel clustering-method job gets its own disjoint set of files
-    across ALL metrics. NOTE: the base filename retains the historical
-    prefix "nonconvex_..." even though Case 2 is a Gaussian-mixture
-    benchmark, not the nonconvex-shapes case (Case 4) -- kept as-is so
-    existing pickles and the exact-string checks in
-    ../tools/verify_score_directions.py keep matching.'''
+    """Return the per-metric cache path, with an optional job-specific suffix.
+    The historical nonconvex_ prefix refers to simulated Case 2 here; the
+    fixed nonconvex benchmarks are Case 3. The repository runner uses no suffix."""
+    # Keep the established cache naming scheme so the table/plot readers
+    # can find results for the same experiment without changing the saved data format.
     suffix = f'_{JOB_TAG}' if JOB_TAG else ''
     return (
         f'data/nonconvex_case_comparison_results_nonself_oriented{suffix}.pkl' if metric == 'ACC'
@@ -763,21 +837,20 @@ for metric in EXTERNAL_METRICS_TO_RUN:
         print(f'No existing results file found at {path} — starting fresh.')
 
 def save_results(results):
-    '''Checkpoint: write one pickle per external metric currently being
-    run, each wrapping `results[metric]` together with light provenance
-    metadata (which score-direction convention was used, which clustering
-    methods have any data at all). Called periodically inside the main
-    loop (every 20 reps and after every case finishes) as well as once at
-    the very end, so a killed/timed-out SLURM job can simply be
-    resubmitted -- results_path_for's JOB_TAG suffix ensures concurrent
-    jobs never overwrite each other's checkpoint files.'''
+    """Write one result snapshot per external criterion, including score orientation.
+    Periodic writes retain partial results, but rerunning this script recomputes
+    requested cases. The experiment runner resumes only at completed-job boundaries."""
     for metric in EXTERNAL_METRICS_TO_RUN:
+        # Store correlations together with the metadata below, including the
+        # score-direction convention, so readers can interpret the cached values.
         payload = {
             'results': results[metric],
             'external_metric': metric,
             'score_direction_convention': SCORE_DIRECTION_CONVENTION,
             'clustering_methods_computed': sorted(results[metric].keys()),
         }
+        # Write the currently accumulated result store as a checkpoint for later
+        # table generation and plotting; this step does not aggregate the scores.
         with open(results_path_for(metric), 'wb') as f:
             pickle.dump(payload, f)
 
@@ -787,7 +860,7 @@ def save_results(results):
 # external metric. So each is computed exactly ONCE per (case, rep), and
 # only the final Spearman-vs-ext_vals step is repeated per metric below.
 
-need_rnn      = ('rNN_Hard' in METHODS_TO_RUN) or ('rNN_Soft' in METHODS_TO_RUN)
+need_rnn      = 'rNN_Hard' in METHODS_TO_RUN
 need_cvdd     = 'CVDD' in METHODS_TO_RUN
 need_viasckde = 'VIASCKDE' in METHODS_TO_RUN
 
@@ -803,8 +876,10 @@ for case in CASES:
     # computed over this whole range. eval_idx then picks out just the
     # positions with K <= max_K_eval, i.e. the narrower range that every
     # reported Spearman rho is actually computed over (see max_K_eval's
-    # docstring). r* selection (rNN_Hard/rNN_Soft) uses the FULL K_TEST
+    # docstring). r* selection (rNN_Hard) uses the FULL K_TEST
     # range, not eval_idx -- that's the whole point of the +10 buffer.
+    # K indexes alternative partitions of the same data. Sweep through K_hat+b
+    # for selection, then restrict to the evaluation subset when reporting rho.
     K_TEST = list(range(2, max_K_s + 1))
     n_k = len(K_TEST)
     K_idx_lookup = {K: i for i, K in enumerate(K_TEST)}
@@ -830,6 +905,9 @@ for case in CASES:
         seed = k_star * 100_000 + D * 100 + COMPACTNESS_INDEX[comp_label] * 10 + rep
 
         X, y = simulate_type2_data(n_samples, D, k_star, compactness, random_state=seed)
+        # Preprocess each feature as (x - sample mean)/sample standard deviation
+        # (StandardScaler uses ddof=0 and leaves constant features at zero).
+        # Use the same transformed X for clustering and every original-data score.
         X = StandardScaler().fit_transform(X)
 
         cvdd_stats     = cvdd_precompute(X) if need_cvdd else None
@@ -842,6 +920,8 @@ for case in CASES:
             # and every external metric below -- clustering is by far the
             # most expensive repeated step, so this dict is the crux of the
             # "multi-metric batching" savings described in the docstring).
+            # Fit each candidate partition once. All indices and all r values below
+            # rank these same partitions within this one clustering algorithm.
             labels_by_K = {K: cm_fn(X, K, seed) for K in K_TEST}
             # Some indices (e.g. silhouette, VRC) are undefined for a
             # degenerate single-cluster labeling; multi_cluster flags which
@@ -921,40 +1001,26 @@ for case in CASES:
                 ])
 
             if need_rnn:
-                # This block is Algorithm 1's core: for EVERY candidate r in
-                # the grid (5, 10, ..., 130), build the rNN affinity
-                # distance matrix (both hard/binary and soft/Gaussian
-                # variants) and compute the silhouette-vs-K curve against
-                # it, over the FULL K_TEST range (not just eval_idx --
-                # selection needs the wider window). This is the most
-                # expensive part of the script: O(len(R_VALUES) x len(K_TEST))
-                # silhouette evaluations per replicate.
-                sil_hard_by_r, sil_soft_by_r = {}, {}
+                # Cache the binary-neighbor Silhouette curve for each r over the full K grid.
+                # These same curves support parameter selection and subsequent evaluation.
+                # For partition C_K, a_i is mean d_r within its cluster (excluding self),
+                # b_i is the smallest mean d_r to another cluster, and
+                # S_r(K) = mean_i[(b_i-a_i)/max(a_i,b_i)], with 0 for a_i=b_i=0 or a singleton.
+                # Vary r to change d_r while retaining C_K; each array scores one r across K.
+                sil_hard_by_r = {}
                 for r in R_VALUES:
-                    D_hard = rnn_affinity_distance(X, r=r, use_gaussian=False)
-                    D_soft = rnn_affinity_distance(X, r=r, use_gaussian=True)
+                    D_hard = rnn_affinity_distance(X, r=r)
                     sil_hard_by_r[r] = np.array([
                         silhouette_score(D_hard, labels_by_K[K], metric='precomputed') if multi_cluster[K] else np.nan
                         for K in K_TEST
                     ])
-                    sil_soft_by_r[r] = np.array([
-                        silhouette_score(D_soft, labels_by_K[K], metric='precomputed') if multi_cluster[K] else np.nan
-                        for K in K_TEST
-                    ])
 
-                # r* selection never looks at the external metric -- done once per rep.
-                # select_r_topK_spearman applies the top-m monotonic-decrease
-                # criterion (see its docstring) independently to the hard and
-                # soft curve families, picking one r* each; only the winning
-                # r's full K-curve is kept in raw_curves for the final
-                # per-metric Spearman step below.
+                # Select r from the internal curve shape without consulting external scores.
+                # Retain the selected curve for the external rank-correlation calculation.
                 if 'rNN_Hard' in METHODS_TO_RUN:
                     r_star_h, _ = select_r_topK_spearman(sil_hard_by_r, R_VALUES, m=M, n_k=n_k, threshold=THRESHOLD)
                     raw_curves['rNN_Hard'] = sil_hard_by_r[r_star_h]
 
-                if 'rNN_Soft' in METHODS_TO_RUN:
-                    r_star_s, _ = select_r_topK_spearman(sil_soft_by_r, R_VALUES, m=M, n_k=n_k, threshold=THRESHOLD)
-                    raw_curves['rNN_Soft'] = sil_soft_by_r[r_star_s]
 
             # ── only this final step is repeated per external metric ──
             # raw_curves now holds one full K_TEST-length score curve per
@@ -964,7 +1030,7 @@ for case in CASES:
             # max_K_eval range) and record its Spearman rho against that
             # metric's oriented values -- one rho appended per (metric,
             # index) per replicate, accumulated into `results` for later
-            # averaging in generate_case2_tables.py.
+            # averaging in scripts/build_tables.py.
             for metric in EXTERNAL_METRICS_TO_RUN:
                 ext_vals = ext_vals_by_metric[metric]
                 for method, curve in raw_curves.items():
@@ -1031,12 +1097,16 @@ def plot_case_boxplot(results, metric, cm_name, case, methods_order):
         print(f'No results to plot for {metric} / {cm_name} / {ckey}')
         return
 
+    # Each method supplies its replication-level correlations for this one setting.
+    # Filter nonfinite entries before summarizing their distribution in a box.
     data = []
     for m in available:
         vals = np.array(cm_results[m], dtype=float)
         data.append(vals[np.isfinite(vals)])
 
     fig, ax = plt.subplots(figsize=(1.6 * len(available) + 2, 6))
+    # Boxes show quartiles and medians across replications, using one box per index.
+    # This diagnostic complements the means/medians exported to the paper tables.
     bp = ax.boxplot(data, tick_labels=available, patch_artist=True)
     palette = sns.color_palette('tab10', n_colors=len(available))
     for patch, color in zip(bp['boxes'], palette):
@@ -1052,6 +1122,8 @@ def plot_case_boxplot(results, metric, cm_name, case, methods_order):
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
+    # Keep diagnostic exports separated by experiment/algorithm so successive
+    # plots do not overwrite results from a different comparison.
     out_dir = f'../../../../figures/nonconvex_clusters/{cm_name}/{metric}'
     os.makedirs(out_dir, exist_ok=True)
     fname = f'NonconvexCase_{ckey}'

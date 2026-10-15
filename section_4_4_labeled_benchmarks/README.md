@@ -1,19 +1,21 @@
-# Section 4.4 — Case 4: Benchmarks with Labeled Data
+# Section 4.4 — Labeled benchmarks
 
-**Main manuscript:** Section 4.4, table `tab:main_labeled_acc_kmeans`.
-**Supplement:** Section S10, 21 result tables. Dataset characteristics are in S5.3.
+**Main text:** Table 3. **Supplement:** Tables S67–S87.
 
-`Benchmark_data_real.py` evaluates nine labeled datasets under three clustering
-algorithms and seven external criteria. `data/` holds saved results.
-`data/raw_datasets/` contains downloaded inputs shared with Sections 4.5 and
-4.6; Digits, Iris, and Wine come from scikit-learn.
+After [environment setup](../README.md#environment-setup), run from the repository root:
 
-From the **repository root**, use `python reproduce.py tables` to rebuild the
-tables, or `python scripts/run_experiments.py case4 --execute` for an isolated
-fresh run. Large datasets can require substantial time and memory.
+```bash
+python reproduce.py tables
+```
 
-The section's outputs are `outputs/tables/realdata_tables_clean_v6.tex` and
-the Case 4 block in `outputs/tables/main_tables.tex`. DBCV on original
-Fashion-MNIST-test remains unavailable (`NA`). Use `reproduce.py` for manuscript table formatting.
-See the [output map](../README.md#output-map) and [dataset sources](../README.md#data-and-attribution).
+The main text table is in `outputs/tables/main_tables.tex`.
+The Supplement tables are in `outputs/tables/realdata_tables_clean_v6.tex`.
 
+To recompute this section's results with `Benchmark_data_real.py`:
+
+```bash
+python scripts/run_experiments.py case4 --execute
+```
+
+Fresh results are saved under `runs/case4/`.
+See the [root README](../README.md#run-all-experiments-from-scratch) to run and export all experiments.

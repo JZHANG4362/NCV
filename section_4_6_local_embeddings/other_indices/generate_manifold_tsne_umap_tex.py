@@ -1,23 +1,10 @@
-r"""
-Generates a SINGLE standalone LaTeX document summarizing all three
-manifold_tsne_umap_case{2,3,4}.py experiments (alternative-indices
-version): one WIDE results table (Spearman rho vs ACC, bold = row max,
-landscape orientation) per (case, clustering method) -- 26 columns
-(rNN_Hard + 8 indices x 3 representations: Original/TSNE/UMAP) -- followed
-by the already-generated per-dataset combined figures (25-method bar chart
-+ rNN_Hard r-landscape -- see plot_combined() in each case script)
-embedded via \includegraphics.
+"""Legacy detailed embedding report and shared dataset metadata.
 
-Run this LOCALLY after retrieving data/ and figures/ from the cluster and
-(for Case 4) running merge_manifold_case4_results.py:
-
-    python generate_manifold_tsne_umap_tex.py
-
-Writes tables/manifold_tsne_umap_summary.tex. Compile with (run TWICE, in
-ONE command, for the table of contents to populate -- needs \usepackage
-{pdflscape} for the landscape tables, standard in most TeX distributions):
-    cd tables && pdflatex manifold_tsne_umap_summary.tex && pdflatex manifold_tsne_umap_summary.tex
-"""
+This optional report contains per-algorithm tables and diagnostic plots;
+it is not an exporter for the current main text Tables 4--5 or Supplement
+Figures S7--S37. Those are produced by scripts/build_tables.py and
+generate_manifold_bar_summary_tex.py through python reproduce.py cached.
+Run this report from its own directory after computing the embedding results."""
 
 import os
 import pickle
@@ -56,6 +43,9 @@ _CASE2_COMPACTNESS = ['compact', 'sparse']
 
 
 def _case2_sample_size_for(k_star):
+    """Use the Case 2 sample size N = min(1000, 50 K*)."""
+    # Cap N at 1000 while targeting 50 observations per true component:
+    # K*=6 gives N=300, and K*=30 gives N=1000 with nearly balanced component sizes.
     return min(1000, k_star * 50)
 
 
@@ -122,10 +112,15 @@ CASES = [
 
 
 def load_results(path):
+    """Load saved correlations after checking their score-direction convention."""
+    # Return an explicit missing-cache value so the report can skip unavailable
+    # results without treating them as zero correlations.
     if not os.path.exists(path):
         return None
     with open(path, 'rb') as f:
         payload = pickle.load(f)
+    # Reject caches with a different score orientation; otherwise signs could
+    # reverse the meaning of an apparent ranking improvement.
     if payload.get('score_direction_convention') != SCORE_DIRECTION_CONVENTION:
         raise ValueError(f'{path} does not use the expected score-direction convention.')
     return payload['results']
@@ -137,6 +132,8 @@ def to_latex_table(case_tag, cm, meta, display, order, results):
     combinations render as "--"; bold marks the row-wise max among the
     FINITE entries only.'''
     cm_label = CM_LABELS.get(cm, cm)
+    # Assemble the caption, column headings, and LaTeX table structure first;
+    # the following row loop inserts the previously computed summaries.
     lines = []
     lines.append(r'\begin{landscape}')
     lines.append(r'\begin{table}[h]')
@@ -163,8 +160,12 @@ def to_latex_table(case_tag, cm, meta, display, order, results):
         row = results.get(cm, {}).get(dname, {})
         vals = [row.get(method) for method in ALL_METHODS]
         finite = [v for v in vals if v is not None and np.isfinite(v)]
+        # This auxiliary report uses its own row-maximum highlighting convention.
+        # Main text Tables 1--5 are formatted separately by scripts/build_tables.py.
         maxv = max(finite) if finite else None
         cells = []
+        # Preserve missing entries as -- and format available correlations to two
+        # decimals; the cached numerical values remain unchanged.
         for v in vals:
             if v is None or not np.isfinite(v):
                 cells.append('--')
@@ -190,6 +191,8 @@ def to_delta_table(case_tag, cm, meta, display, order, results):
     help or hurt, relative to computing the same index on raw X?). Rows =
     datasets, same order as the main table. Sign shown explicitly (+/-);
     no bolding -- the sign/magnitude itself is the point, not a row max.'''
+    # Assemble the caption, column headings, and LaTeX table structure first;
+    # the following row loop inserts the previously computed summaries.
     lines = []
     lines.append(r'\begin{landscape}')
     lines.append(r'\begin{table}[h]')
@@ -205,6 +208,8 @@ def to_delta_table(case_tag, cm, meta, display, order, results):
     lines.append(r'\centering')
     lines.append(r'\begin{tabular}{l' + 'c' * (3 + 2 * len(INDEX_NAMES)) + '}')
     lines.append(r'\hline')
+    # Give every index two difference columns, in t-SNE then UMAP order,
+    # so the row assembly below matches the displayed column headings.
     header = ['Dataset', '$K^*$', '$N$', '$D$']
     for idx in INDEX_NAMES:
         header += [rf'{idx} $\Delta$t-SNE', rf'{idx} $\Delta$UMAP']
@@ -215,6 +220,8 @@ def to_delta_table(case_tag, cm, meta, display, order, results):
         row = results.get(cm, {}).get(dname, {})
         cells = []
         for idx in INDEX_NAMES:
+            # Use each index's own original-data correlation as the paired baseline.
+            # Subtract only when both it and the embedding correlation are available.
             orig = row.get(f'{idx}_Original')
             for rep in ['TSNE', 'UMAP']:
                 v = row.get(f'{idx}_{rep}')
@@ -237,6 +244,8 @@ def to_delta_table(case_tag, cm, meta, display, order, results):
 def figure_block(case_tag, cm, dname, display, fig_dir):
     '''One \figure block (in a landscape page, matching the wide 2-panel
     bar+r-landscape plot) for one (case, clustering_method, dataset).'''
+    # Reference the already exported PDF and describe its panel encodings.
+    # This builds a report fragment; it does not rerender or alter the figure data.
     rel_path = os.path.join('..', fig_dir, cm, EXPERIMENT_TAG, f'Combined_{dname}.pdf')
     lines = []
     lines.append(r'\begin{landscape}')
@@ -297,7 +306,7 @@ negated so larger is always better, matching WB's own sign convention).
 to VRC by construction, so it was reported only once, under VRC.) All 8
 formulas are ported VERBATIM from
 \texttt{section\_4\_4\_labeled\_benchmarks/Benchmark\_data\_real.py} -- the same implementations
-used for Table~\ref{tab:main_labeled_acc_kmeans} in \texttt{main.tex}
+used for Table~3 in the main manuscript
 (verified: this package's Iris/KMeans ``Orig'' column reproduces that
 table's published VRC/WG/WB/DBCV/CVDD/VIASCKDE/DCSI values exactly).
 
@@ -336,6 +345,9 @@ DOC_CLOSING = r"""\end{document}
 
 
 def main():
+    """Build the auxiliary per-dataset embedding correlation and difference report."""
+    # Assemble this auxiliary standalone report from saved correlations.
+    # The main text/Supplement table fragments are built by scripts/build_tables.py.
     parts = [DOC_PREAMBLE]
 
     for case in CASES:
@@ -346,6 +358,8 @@ def main():
             print(f"{case['tag']}: NO RESULTS FILE -- skipped")
             continue
 
+        # Group each case by clustering algorithm, pairing absolute correlations
+        # with same-index embedding differences in two companion tables.
         for cm in CLUSTERING_METHODS:
             if cm not in results:
                 print(f"{case['tag']} / {cm}: no results -- skipping table+figures")
@@ -361,6 +375,8 @@ def main():
             for dname in case['order']:
                 if dname not in results.get(cm, {}):
                     continue
+                # Include a diagnostic PDF only if it has already been generated for
+                # this dataset/algorithm pair; report missing figures without inventing data.
                 fig_path = os.path.join(case['fig_dir'], cm, EXPERIMENT_TAG, f'Combined_{dname}.pdf')
                 if not os.path.exists(fig_path):
                     print(f"  {case['tag']} / {cm} / {dname}: results present but figure "

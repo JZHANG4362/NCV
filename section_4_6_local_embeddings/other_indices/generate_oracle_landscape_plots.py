@@ -1,31 +1,10 @@
-r"""
-For each case (2/3/4), plots the MEAN Spearman rho vs. ACC as a function
-of the candidate parameter value (perplexity for t-SNE, n_neighbors for
-UMAP), one line per index, averaged across every (clustering_method,
-dataset) pair in that case -- straight from the ALREADY-SAVED per-
-parameter sensitivity curves (manifold_param_sensitivity_results_*.pkl),
-no re-running of any cluster job needed.
+"""Plot optional embedding-parameter diagnostics from saved ACC correlations.
 
-This answers the ORACLE question directly and visually: does there EXIST
-a parameter range where an index correlates well with ACC (the curve's
-peak), independent of whether Algorithm 1's K-curve-shape criterion can
-actually FIND that peak from the data alone (Algorithm 1's pick would be
-a single x-position on this same curve, not necessarily the peak).
-
-Datasets within a case don't all share the same candidate grid (e.g. a
-small dataset like Iris only survives the `3*p < n_samples-1` filter up
-to perplexity=40) -- at each x-value, the mean is taken over whichever
-(cm, dataset) pairs actually have that x in their grid, so the curve
-narrows to fewer contributing points at the high end.
-
-Run this LOCALLY after retrieving data/ from the cluster and (for Case 4)
-running merge_manifold_case4_results.py:
-
-    python generate_oracle_landscape_plots.py
-
-Writes figures/oracle_landscape/{case_tag}_perplexity.{pdf,png} and
-..._n_neighbors.{pdf,png} for each case.
-"""
+Average correlations at each candidate parameter across available datasets
+and clustering algorithms. These plots are not the oracle calculation in
+main text Table 5: that table first selects the best parameter separately
+for each dataset, algorithm, index, and embedding, then counts improvements.
+No new embedding or clustering is fitted here. Run from this directory."""
 
 import os
 import pickle
@@ -62,10 +41,15 @@ CASES = [
 
 
 def load_results(path):
+    """Load saved correlations after checking their score-direction convention."""
+    # Return an explicit missing-cache value so the report can skip unavailable
+    # results without treating them as zero correlations.
     if not os.path.exists(path):
         return None
     with open(path, 'rb') as f:
         payload = pickle.load(f)
+    # Reject caches with a different score orientation; otherwise signs could
+    # reverse the meaning of an apparent ranking improvement.
     if payload.get('score_direction_convention') != SCORE_DIRECTION_CONVENTION:
         raise ValueError(f'{path} does not use the expected score-direction convention.')
     return payload['results']
@@ -76,6 +60,8 @@ def aggregate_curves(results, param_key):
     param_key: 'perplexity' or 'n_neighbors'.
     Returns {idx: {param_value: (mean_rho, n_contributing)}}, only for
     indices that actually have data."""
+    # Collect available rho values by index and embedding parameter across
+    # dataset/algorithm pairs; each contributing pair receives equal weight.
     per_index = defaultdict(lambda: defaultdict(list))
     for cm, by_dataset in results.items():
         for dname, entry in by_dataset.items():
@@ -83,6 +69,8 @@ def aggregate_curves(results, param_key):
                 for p, rho in curve.items():
                     if rho is not None and np.isfinite(rho):
                         per_index[idx][p].append(rho)
+    # Save both mean correlation and support count because the number of
+    # available pairs may differ between parameter values.
     agg = {}
     for idx, by_param in per_index.items():
         agg[idx] = {p: (float(np.mean(vals)), len(vals)) for p, vals in by_param.items()}
@@ -90,12 +78,19 @@ def aggregate_curves(results, param_key):
 
 
 def plot_landscape(case_tag, case_title, agg, xlabel, param_name, out_path):
+    """Plot optional mean-ACC landscapes over an embedding-parameter grid.
+    
+    Each index curve averages the available dataset/algorithm pairs.
+    The legend reports how many pairs contribute at each parameter;
+    these exploratory summaries do not select the paper's tuned parameters."""
     present = [idx for idx in INDEX_NAMES if idx in agg]
     missing = [idx for idx in INDEX_NAMES if idx not in agg]
 
     fig, ax = plt.subplots(figsize=(11, 6.5))
     if present:
         for idx in present:
+            # Sort each index's candidate grid and retrieve its mean and support count
+            # together so the legend describes the observations behind the curve.
             xs = sorted(agg[idx].keys())
             ys = [agg[idx][x][0] for x in xs]
             ns = [agg[idx][x][1] for x in xs]
@@ -132,12 +127,15 @@ def plot_landscape(case_tag, case_title, agg, xlabel, param_name, out_path):
 
 
 def main():
+    """Build optional t-SNE and UMAP mean-correlation landscapes from saved curves."""
     for case in CASES:
         results = load_results(case['path'])
         if results is None:
             print(f"{case['tag']}: NO SENSITIVITY DATA FILE FOUND at {case['path']} -- skipping")
             continue
 
+        # Keep t-SNE perplexity and UMAP neighbor-count grids separate when
+        # aggregating and drawing the optional parameter landscapes.
         agg_p = aggregate_curves(results, 'perplexity')
         agg_k = aggregate_curves(results, 'n_neighbors')
 

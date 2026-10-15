@@ -1,24 +1,21 @@
-# Section 4.2 — Case 2: Benchmark Study Using Simulated Datasets
+# Section 4.2 — Simulated benchmarks
 
-**Main manuscript:** Section 4.2, table `tab:main_case2_acc`.
-**Supplement:** Section S8, 42 mean/median tables. Dataset design is in S5.1.
+**Main text:** Table 1. **Supplement:** Tables S4–S45.
 
-`partA_type2_grid_comparison.py` runs the 12 simulated settings for the three
-clustering algorithms and seven external validity criteria. Canonical results
-are in `data/`; the historical `nonconvex_` filename prefix belongs to this
-simulated study and does not indicate Case 3.
-
-From the **repository root**:
+After [environment setup](../README.md#environment-setup), run from the repository root:
 
 ```bash
 python reproduce.py tables
+```
+
+The main text table is in `outputs/tables/main_tables.tex`.
+The Supplement tables are in `outputs/tables/case2_tables_clean_v6.tex`.
+
+To recompute this section's results with `partA_type2_grid_comparison.py`:
+
+```bash
 python scripts/run_experiments.py case2 --execute
 ```
 
-The first command rebuilds all manuscript table fragments from saved results.
-The second runs this section's experiments in an isolated directory. Its
-corresponding outputs are `outputs/tables/case2_tables_clean_v6.tex` and the
-Case 2 block in `outputs/tables/main_tables.tex`.
-
-**Known gap:** Spectral / `k30_D200_sparse` has 39 saved replications instead
-of 100. See the [reproduction notes](../README.md#reproduction-notes).
+Fresh results are saved under `runs/case2/`.
+See the [root README](../README.md#run-all-experiments-from-scratch) to run and export all experiments.

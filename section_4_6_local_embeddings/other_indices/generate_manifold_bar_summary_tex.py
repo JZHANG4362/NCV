@@ -1,47 +1,14 @@
-r"""
-Bar-only companion to manifold_tsne_umap_summary.tex: for each (case,
-clustering method, dataset), the SAME method-comparison bar chart as
-that document's Combined_{dataset}.pdf figures, WITHOUT the rNN_Hard
-r-vs-r-landscape panel -- redrawn from scratch with:
+"""Draw Supplement Section S12, Figures S7--S37, from tuned ACC correlations.
 
-  - Silhouette added as a full Original / t-SNE / UMAP triplet, exactly
-    like each alternative index. This manifold package (codes_new_
-    manifold_alt_indices_tuned_orig_kgrid) never computed Silhouette
-    itself -- only rNN_Hard and the 8 alternative indices -- but the
-    SIBLING package section_4_6_local_embeddings/silhouette runs
-    the identical experiment design for exactly this: ordinary Euclidean
-    Silhouette on raw X ('Silhouette'), on a t-SNE embedding
-    ('TSNE_Ordinary', perplexity tuned via Algorithm 1), and on a UMAP
-    embedding ('UMAP_Ordinary', n_neighbors tuned via Algorithm 1). All
-    three are pulled in from that sibling's own manifold_fixed_results_
-    *.pkl (../silhouette/data/).
+Combine the Silhouette and other-index result stores. For each dataset,
+stack the three clustering algorithms and group original, t-SNE, and UMAP
+scores by internal index. Solid, ///, and xxx fills distinguish these
+representations; embedding-bar labels give the change from that index's
+own original-data correlation. These use Algorithm 1's selected parameters.
 
-  - Each of the 8 alternative indices' (and Silhouette's) Original /
-    t-SNE / UMAP triplet grouped closely together (small gap within a
-    triplet, larger gap between different indices) and drawn in the
-    SAME base color per index (consistent with generate_oracle_
-    landscape_plots.py's INDEX_COLORS) -- distinguished by FILL, not
-    color: solid for Original, '///' hatch for t-SNE, 'xxx' hatch for
-    UMAP.
-
-  - A delta-vs-Original value label above every t-SNE/UMAP bar: RED text
-    for an increase over that index's (or Silhouette's) own Original
-    value, BLUE text for a decrease.
-
-Uses the TUNED (Algorithm-1 actual selection) results -- the exact same
-manifold_fixed_results_*.pkl data source as manifold_tsne_umap_tex.py's
-own table -- not the oracle-best data.
-
-Run this LOCALLY after retrieving data/ (for both this package AND the
-sibling section_4_6_local_embeddings/silhouette) and, for Case 4,
-running merge_manifold_case4_results.py in EACH of the two packages:
-
-    python generate_manifold_bar_summary_tex.py
-
-Writes tables/manifold_bar_summary.tex and figures/bar_summary/**.pdf.
-Compile with (run TWICE, in ONE command, for the table of contents):
-    cd tables && pdflatex manifold_bar_summary.tex && pdflatex manifold_bar_summary.tex
-"""
+Figures S7--S18 cover Case 2, S19--S28 Case 3, and S29--S37 Case 4.
+Run here: python generate_manifold_bar_summary_tex.py
+python reproduce.py cached collects these PDFs from the repository root."""
 
 import os
 
@@ -96,12 +63,13 @@ CASES = [
 
 
 def build_bar_groups(row, sil_row):
-    """Returns a list of GROUPS; each group is a list of bar specs
-    (label, color, hatch, value, orig_ref) drawn with no gap between
-    bars in the same group, and GROUP_GAP between groups. orig_ref is
-    that group's own Original value (for the delta label), or None for
-    bars that don't get one (rNN_Hard, and Original itself). Silhouette
-    is listed FIRST, matching improvement_summary.tex's row order."""
+    """Group original, t-SNE, and UMAP correlations for Figures S7--S37.
+    
+    Each bar specification carries its own index's original-data reference
+    for the delta label. Hard rNN-Sil is a separate reference bar. Silhouette
+    appears first, followed by rNN-Sil and the eight other internal indices."""
+    # The Silhouette pipeline stores its three representations under separate keys.
+    # Pair them with Sil's own original-data rho before joining the other indices.
     sil_orig_v = sil_row.get(SIL_METHOD_KEYS['Original'])
     sil_group = []
     for rep in REPS:
@@ -115,6 +83,8 @@ def build_bar_groups(row, sil_row):
     ]
 
     for idx in INDEX_NAMES:
+        # For each remaining index, the reference is that index on original X.
+        # Embedding gains are not measured against a shared Silhouette baseline.
         orig_v = row.get(f'{idx}_Original')
         group = []
         for rep in REPS:
@@ -126,8 +96,16 @@ def build_bar_groups(row, sil_row):
 
 
 def draw_bars_on_ax(ax, cm, row, sil_row, show_xticklabels):
+    """Draw one algorithm's panel in Supplement Figures S7--S37.
+    
+    Group each index's original, t-SNE, and UMAP correlations together.
+    Color identifies the index; hatch identifies the representation.
+    Annotate each embedding bar by its difference from that index's own
+    original-data correlation. Missing values receive N/A, not a zero score."""
     groups = build_bar_groups(row, sil_row)
 
+    # Flatten the index groups into parallel arrays, retaining a gap between groups.
+    # This common layout aligns the three clustering-algorithm panels.
     xs, labels, colors, hatches, vals, orig_refs = [], [], [], [], [], []
     x = 0.0
     for group in groups:
@@ -141,10 +119,14 @@ def draw_bars_on_ax(ax, cm, row, sil_row, show_xticklabels):
             x += 1.0
         x += GROUP_GAP
 
+    # Matplotlib needs numeric bar heights. Use a zero placeholder for missing
+    # values, then make those bars transparent and label them N/A below.
     finite_mask = [v is not None and np.isfinite(v) for v in vals]
     plot_vals = [v if m else 0.0 for v, m in zip(vals, finite_mask)]
 
     bars = ax.bar(xs, plot_vals, width=0.9, color=colors, edgecolor='black', linewidth=0.5)
+    # Solid, ///, and xxx distinguish original, t-SNE, and UMAP representations.
+    # Use the same color within an index group to keep that comparison visible.
     for bar, hatch, m in zip(bars, hatches, finite_mask):
         bar.set_alpha(0.9 if m else 0.0)
         if hatch:
@@ -158,8 +140,12 @@ def draw_bars_on_ax(ax, cm, row, sil_row, show_xticklabels):
     for xpos, v, orig_ref, m in zip(xs, vals, orig_refs, finite_mask):
         if not m or orig_ref is None or not np.isfinite(orig_ref):
             continue
+        # Delta rho = embedded rho - this index's original rho for the same dataset
+        # and algorithm. Red means improvement; blue means deterioration.
         delta = v - orig_ref
         color = 'red' if delta > 0 else ('blue' if delta < 0 else 'black')
+        # Place the difference label beyond the bar's endpoint, including negative bars,
+        # so annotation placement follows the sign of the bar height.
         y = v + (0.03 if v >= 0 else -0.03)
         va = 'bottom' if v >= 0 else 'top'
         ax.text(xpos, y, f'{delta:+.2f}', ha='center', va=va, fontsize=8,
@@ -179,15 +165,20 @@ def plot_bar_stacked(dname, rows_by_cm, sil_rows_by_cm, out_dir):
     """One figure per dataset: 3 stacked subplots, one per clustering
     method (KMeans/Spectral/Agglomerative, top to bottom), sharing the
     same x-axis layout so the three methods line up bar-for-bar."""
+    # Use one row per algorithm in the fixed K-means/spectral/agglomerative order.
+    # Sharing x ensures each index/representation occupies the same horizontal slot.
     fig, axes = plt.subplots(len(CLUSTERING_METHODS), 1, figsize=(22, 16), sharex=True)
     for i, cm in enumerate(CLUSTERING_METHODS):
         row = rows_by_cm.get(cm, {})
         sil_row = sil_rows_by_cm.get(cm, {})
+        # Show x labels only on the bottom row to avoid repeating a crowded label set.
         draw_bars_on_ax(axes[i], cm, row, sil_row, show_xticklabels=(i == len(CLUSTERING_METHODS) - 1))
 
     fig.suptitle(dname, fontsize=16, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     os.makedirs(out_dir, exist_ok=True)
+    # Export one vector PDF per dataset for Figures S7--S37 plus a PNG preview.
+    # Return the PDF path for inclusion in the optional standalone report.
     pdf_path = os.path.join(out_dir, f'{dname}.pdf')
     fig.savefig(pdf_path, bbox_inches='tight')
     fig.savefig(os.path.join(out_dir, f'{dname}.png'), dpi=150, bbox_inches='tight')
@@ -208,6 +199,9 @@ KNOWN_GAPS = {
 
 
 def figure_block(case_tag, dname, display, pdf_path):
+    """Wrap an exported dataset figure in a LaTeX figure block for the standalone report."""
+    # Reference the already exported PDF and describe its panel encodings.
+    # This builds a report fragment; it does not rerender or alter the figure data.
     lines = []
     lines.append(r'\begin{figure}[h]')
     lines.append(r'\centering')
@@ -300,9 +294,12 @@ DOC_CLOSING = r"""\end{document}
 
 
 def main():
+    """Join both embedding pipelines and export the 31 dataset figures S7--S37."""
     parts = [DOC_PREAMBLE]
 
     for case in CASES:
+        # Join Silhouette and the other-index caches for the same case. Each
+        # dataset contributes one figure with all three algorithms stacked.
         sil_results = load_manifold_results(case['sil_path'])
         results = load_manifold_results(case['results_path'])
         parts.append(f"\\section{{{case['title']}}}\n")
@@ -312,10 +309,13 @@ def main():
             continue
         if sil_results is None:
             print(f"{case['tag']}: NO SILHOUETTE RESULTS FILE at {case['sil_path']} -- Silhouette bars will be blank")
+            # Join Silhouette and the other-index caches for the same case. Each
+            # dataset contributes one figure with all three algorithms stacked.
             sil_results = {}
 
         out_dir = os.path.join(FIG_DIR, case['tag'])
         n_figs = 0
+        # Follow the configured dataset order used by Figures S7--S37.
         for dname in case['order']:
             rows_by_cm = {cm: results.get(cm, {}).get(dname, {}) for cm in CLUSTERING_METHODS}
             if not any(rows_by_cm.values()):

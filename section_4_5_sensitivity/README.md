@@ -1,25 +1,27 @@
-# Section 4.5 — Sensitivity Analysis
+# Section 4.5 — Sensitivity analysis
 
-**Main manuscript:** Section 4.5.
-**Supplement:** Section S11, sensitivity to the threshold, cluster-count bound,
-and diagnostic-window buffer.
+**Supplement:** Figures S4–S6, discussed in main text Section 4.5.
 
-| Subfolder | Purpose |
+After [environment setup](../README.md#environment-setup), run from the repository root:
+
+```bash
+python reproduce.py cached
+```
+
+Find the PDFs in `outputs/figures/`:
+
+| Supplement figure | PDF |
 |---|---|
-| `simulated_data/` | 12 Case 2 settings, 30 replications each |
-| `nonconvex_data/` | Ten Case 3 nonconvex datasets |
-| `labeled_data/` | Six smaller Case 4 labeled datasets |
-| `summary_plots/` | Combines the saved results into the three S11 figures |
+| Figure S4 — threshold | `rstar_tau_sensitivity.pdf` |
+| Figure S5 — cluster-count bound | `rstar_khat_sensitivity.pdf` |
+| Figure S6 — diagnostic-window buffer | `rstar_b_sensitivity.pdf` |
 
-Each dataset subfolder has `rstar_selection_landscape.py` and saved results in
-`data/`. These experiments use K-means and ACC. The summary script is
-`summary_plots/tau_khat_window_sensitivity.py`.
+`summary_plots/tau_khat_window_sensitivity.py` draws these figures from the
+saved results in `simulated_data/`, `nonconvex_data/`, and `labeled_data/`.
+To rerun the experiments and plotting:
 
-From the **repository root**, use `python reproduce.py cached` for the manuscript
-figures, or `python scripts/run_experiments.py sensitivity --execute` for fresh
-computation in a separate directory.
+```bash
+python scripts/run_experiments.py sensitivity --execute
+```
 
-The three manuscript outputs are `outputs/figures/rstar_tau_sensitivity.pdf`,
-`rstar_khat_sensitivity.pdf`, and `rstar_b_sensitivity.pdf`. This study has its
-own replication design, distinct from the main benchmark in Section 4.2.
-
+Fresh results and plots are saved under `runs/sensitivity/`.

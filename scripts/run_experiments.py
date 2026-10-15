@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Plan or execute fresh experiments in an isolated copy, preserving supplied caches."""
+"""Run the numerical studies in an isolated copy of the code and raw data.
+
+Groups case1--case4, sensitivity, and embeddings correspond to main text
+Sections 4.1--4.6 and Supplement Sections S7--S12. Jobs run sequentially
+because algorithms can share result files. --resume skips successful jobs;
+an interrupted job runs again from its beginning. The smoke group uses
+Iris to check the benchmark and embedding pipelines, not the full study."""
 from __future__ import annotations
 import argparse
 import json
@@ -28,6 +34,11 @@ PACKAGES=[
 CMS=['KMeans','Spectral','Agglomerative']
 
 def jobs(group):
+    # Case 1 runs data/score generation, replicated differences, the assembled
+    # main text Figure 2, then Supplement Figures S1--S3, in dependency order.
+    # Cases 2--4 save correlations for tables; sensitivity and embeddings save
+    # the inputs to Supplement Figures S4--S6 and S7--S37, respectively.
+    """List the scripts, working folders, and arguments needed for an experiment group."""
     plans={
         'case1': [('section_4_1_gaussian_simulation',n,[]) for n in ['gaussian_simulation.ipynb','gaussian_simulation_boxplot.ipynb','combined_boxplot_figure.ipynb','gaussian_multimetric_landscape_figure.py']],
         'case2': [('section_4_2_simulated_benchmarks','partA_type2_grid_comparison.py',[cm]) for cm in CMS],
@@ -44,7 +55,10 @@ def jobs(group):
     return plans[group]
 
 def stage(dest):
+    """Copy experiment source and raw datasets into an isolated fresh-run directory."""
     dest.mkdir(parents=True,exist_ok=False)
+    # Stage source and raw datasets only. Excluding saved numerical results
+    # makes this a fresh computation rather than a redraw from supplied caches.
     for name in PACKAGES:
         for p in (ROOT/name).rglob('*'):
             if p.is_file() and (p.suffix in ['.py','.ipynb'] or '/data/raw_datasets/' in p.as_posix()):
@@ -53,6 +67,7 @@ def stage(dest):
     (dest/'RUN_STATE.json').write_text(json.dumps({'group':None,'completed':[]},indent=2)+'\n')
 
 def main():
+    """Plan or execute an experiment group in its isolated run directory."""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('group',choices=['case1','case2','case3','case4','sensitivity','embeddings','all','smoke'])
     parser.add_argument('--workdir',type=Path,default=None)
@@ -63,8 +78,12 @@ def main():
     for folder,name,options in plan:
         print(f'[{folder}] '+shlex.join([Path(sys.executable).name,name,*options]))
     print(f'Run directory: {dest}',flush=True)
+    # The default invocation only prints the job plan. --execute starts
+    # the staged computations, in their dependency order.
     if not args.execute:
         print('Plan only. Add --execute to run. Full jobs can be expensive; use smoke first.');return
+    # A resumed run reuses its recorded group and skips only completed jobs;
+    # a failed or interrupted job starts again from its beginning.
     if args.resume:
         state=json.loads((dest/'RUN_STATE.json').read_text())
         if state['group']!=args.group:parser.error('Use the same group when resuming a run')
@@ -78,12 +97,16 @@ def main():
         if key in state['completed']:
             print(f'Skipping successful job: {key}',flush=True);continue
         path=dest/folder/name
+        # Notebooks need the sequential cell runner; Python scripts can be
+        # invoked directly with the requested algorithm/dataset arguments.
         command=([sys.executable,str(ROOT/'scripts/run_notebook.py'),str(path)] if path.suffix=='.ipynb' else [sys.executable,str(path),*options])
         log=dest/'logs'/f'{number:02d}_{path.stem}.log'
         print(f'Running {key}; log: {log}',flush=True)
         start=time.monotonic()
         with log.open('w') as f:
             subprocess.run(command,cwd=path.parent,env=environment(dest),stdout=f,stderr=subprocess.STDOUT,check=True)
+        # Record success only after the subprocess exits successfully, so later
+        # --resume calls do not mistake an interrupted job for a finished one.
         state['completed'].append(key)
         state.setdefault('elapsed_seconds',{})[key]=round(time.monotonic()-start,2)
         state_path.write_text(json.dumps(state,indent=2)+'\n')
