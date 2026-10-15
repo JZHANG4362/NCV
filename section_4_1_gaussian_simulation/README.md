@@ -17,5 +17,5 @@ fresh computation in a separate run directory.
 
 Outputs include `outputs/figures/gaussian_combined_landscape_boxplot.pdf` and
 the three `outputs/figures/gaussian_multimetric_*_landscape.pdf` files.
-See the [full output map](../docs/OUTPUT_MAP.md).
+See the [full output map](../README.md#output-map).
 

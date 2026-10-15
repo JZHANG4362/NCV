@@ -21,7 +21,4 @@ corresponding outputs are `outputs/tables/case2_tables_clean_v6.tex` and the
 Case 2 block in `outputs/tables/main_tables.tex`.
 
 **Known gap:** Spectral / `k30_D200_sparse` has 39 saved replications instead
-of 100. See the [audit](../docs/AUDIT.md). `merge_case2_results.py` and
-`generate_case2_tables.py` are historical merge/inspection helpers; use
-`reproduce.py` for the current manuscript layout.
-
+of 100. See the [reproduction notes](../README.md#reproduction-notes).

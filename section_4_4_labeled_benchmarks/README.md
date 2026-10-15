@@ -14,7 +14,6 @@ fresh run. Large datasets can require substantial time and memory.
 
 The section's outputs are `outputs/tables/realdata_tables_clean_v6.tex` and
 the Case 4 block in `outputs/tables/main_tables.tex`. DBCV on original
-Fashion-MNIST-test remains unavailable (`NA`). Historical merge and inspection
-helpers are retained; use `reproduce.py` for current formatting.
-See the [output map](../docs/OUTPUT_MAP.md) and [dataset sources](../docs/DATA.md).
+Fashion-MNIST-test remains unavailable (`NA`). Use `reproduce.py` for manuscript table formatting.
+See the [output map](../README.md#output-map) and [dataset sources](../README.md#data-and-attribution).
 

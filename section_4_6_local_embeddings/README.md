@@ -26,7 +26,7 @@ python scripts/run_experiments.py embeddings --execute
 The first two commands rebuild manuscript outputs from the supplied results.
 The last runs both numerical pipelines afresh in a separate directory. Exact
 fresh embedding reproduction is not established; see the
-[validation findings](../docs/VALIDATION.md).
+[reproduction notes](../README.md#reproduction-notes).
 
 The main table fragments are in `outputs/local_embedding_tables/`.
 The 31 figures are in `outputs/figures/local_embedding_bar_plots/` and are

@@ -2,17 +2,15 @@
 """Rebuild the paper's outputs; start with `python reproduce.py tables`."""
 from __future__ import annotations
 import argparse
-import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-import time
 
 ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'scripts'))
-from build_tables import build
+from build_tables import build, CASE2_CASES, CASE3_K, CASE4_K
 
 def environment(output):
     env=os.environ.copy()
@@ -35,16 +33,37 @@ def run(script,args,cwd,output):
     with log.open('w') as f:
         subprocess.run([sys.executable,str(script),*args],cwd=cwd,env=environment(output),stdout=f,stderr=subprocess.STDOUT,check=True)
 
+def figure_paths(src):
+    """Map generated figures to the paths used by the manuscript."""
+    gaussian = src/'section_4_1_gaussian_simulation/figures/combined'
+    names = ['gaussian_combined_landscape_boxplot.pdf'] + [
+        f'gaussian_multimetric_{method}_landscape.pdf'
+        for method in ['kmeans', 'spectral', 'agglomerative']
+    ]
+    files = [(gaussian/name, Path('figures')/name) for name in names]
+    sensitivity = src/'section_4_5_sensitivity/summary_plots/figures'
+    files.extend((sensitivity/f'{parameter}_sensitivity_hard.pdf',
+                  Path('figures')/f'rstar_{parameter}_sensitivity.pdf')
+                 for parameter in ['tau', 'khat', 'b'])
+    datasets = {
+        2: [f'k{k}_D{d}_{c}' for k, d, c in CASE2_CASES],
+        3: list(CASE3_K),
+        4: list(CASE4_K),
+    }
+    embeddings = src/'section_4_6_local_embeddings/other_indices/figures/bar_summary'
+    for case, names in datasets.items():
+        for name in names:
+            relative = Path(f'case{case}')/f'{name}.pdf'
+            files.append((embeddings/relative, Path('figures/local_embedding_bar_plots')/relative))
+    return files
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode',choices=['tables','cached','archive'])
+    parser.add_argument('mode',choices=['tables','cached'],help='tables: generate LaTeX tables; cached: also redraw PDF figures')
     parser.add_argument('--output',type=Path,default=ROOT/'outputs')
     parser.add_argument('--results-root',type=Path,default=ROOT,help='root of an isolated full run; defaults to supplied caches')
-    parser.add_argument('--allow-changed-results',action='store_true')
     args=parser.parse_args();out=args.output.resolve();src=args.results_root.resolve()
-    start=time.monotonic()
-    build(out,not args.allow_changed_results,src)
-    provenance=json.loads((ROOT/'reference/figure_provenance.json').read_text())
+    build(out,src)
     if args.mode=='cached':
         # This notebook uses two numerical caches and recomputes only the
         # representative data set's selected-r panel (not the 100 repetitions).
@@ -53,23 +72,11 @@ def main():
               ('section_4_5_sensitivity/summary_plots','tau_khat_window_sensitivity.py'),
               ('section_4_6_local_embeddings/other_indices','generate_manifold_bar_summary_tex.py')]
         for folder,name in jobs:run(src/folder/name,[],src/folder,out)
-        for item in provenance:
-            source=src/item['packaged_source']
-            target=out/item['output'];target.parent.mkdir(parents=True,exist_ok=True)
+        figures = figure_paths(src)
+        for source, relative_output in figures:
+            target=out/relative_output;target.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(source,target)
-    elif args.mode=='archive':
-        if src!=ROOT:parser.error('archive mode applies only to the supplied manuscript snapshot')
-        for item in provenance:
-            target=out/item['output'];target.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copy2(ROOT/'reference'/item['output'],target)
-    if args.mode!='tables':
-        missing=[p['output'] for p in provenance if not (out/p['output']).is_file()]
-        if missing:raise SystemExit(f'Missing figures: {missing}')
-        print(f'Collected {len(provenance)} figures.')
-    report={'mode':args.mode,'elapsed_seconds':round(time.monotonic()-start,2),
-            'python':sys.version,'tables_verified_against_snapshot':not args.allow_changed_results,
-            'figure_mode':{'tables':'not requested','cached':'redrawn; the single Case 1 selected-r panel is recalculated','archive':'copied verbatim from the manuscript snapshot'}[args.mode]}
-    (out/'run_report.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(f'Collected {len(figures)} figures.')
     print(f'Done: {out}')
 
 if __name__=='__main__':main()

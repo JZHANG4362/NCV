@@ -13,7 +13,5 @@ table fragments, or `python scripts/run_experiments.py case3 --execute` for a
 fresh run in a separate directory.
 
 The section's outputs are `outputs/tables/nonconvex_tables_clean_v6.tex` and
-the Case 3 block in `outputs/tables/main_tables.tex`. The historical
-`generate_nonconvex_tables.py` creates a separate inspection layout.
-See the [output map](../docs/OUTPUT_MAP.md) and [dataset sources](../docs/DATA.md).
+the Case 3 block in `outputs/tables/main_tables.tex`. See the [output map](../README.md#output-map) and [dataset sources](../README.md#data-and-attribution).
 
